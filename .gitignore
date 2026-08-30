@@ -1,0 +1,16 @@
+.DS_Store
+.idea/
+.venv/
+runtime/
+*.log
+*.iml
+
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
+android/captures/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/

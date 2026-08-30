@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">订单页面转录器</string>
+    <string name="accessibility_description">仅在你点按“提取页面”时读取当前窗口文字；文字不足时在内存中截图并本地 OCR，不保存图片，不自动点击页面。</string>
+</resources>
