@@ -26,15 +26,25 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import org.json.JSONArray
 import org.json.JSONObject
-import java.time.OffsetDateTime
 
 class MainActivity : Activity() {
     private lateinit var store: SecureStore
     private lateinit var network: NetworkClient
     private lateinit var status: TextView
+    private lateinit var pairingStatus: TextView
+    private lateinit var warningView: TextView
     private lateinit var titleEditor: EditText
+    private lateinit var platformEditor: EditText
+    private lateinit var merchantEditor: EditText
+    private lateinit var orderNumberEditor: EditText
+    private lateinit var paidEditor: EditText
+    private lateinit var orderStatusEditor: EditText
+    private lateinit var orderedAtEditor: EditText
     private lateinit var rawEditor: EditText
     private lateinit var itemContainer: LinearLayout
     private var itemRows = mutableListOf<ItemEditRow>()
@@ -76,10 +86,23 @@ class MainActivity : Activity() {
             setPadding(0, dp(8), 0, dp(12))
         })
 
-        val captureRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        captureRow.addView(button("提取当前页") { requestCapture(false) }, weight())
-        captureRow.addView(button("追加一页") { requestCapture(true) }, weight())
-        content.addView(captureRow)
+        content.addView(TextView(this).apply { text = "Mac 配对"; textSize = 18f })
+        pairingStatus = TextView(this).apply { textSize = 14f; setPadding(0, dp(6), 0, dp(4)) }
+        content.addView(pairingStatus)
+        val pairingRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        pairingRow.addView(button("扫描配对二维码") { scanPairingQr() }, weight())
+        pairingRow.addView(button("粘贴配对链接") { pastePairingLink() }, weight())
+        content.addView(pairingRow)
+
+        content.addView(TextView(this).apply {
+            text = "采集方法：回到订单详情页，再点系统无障碍按钮或“提取页面”快捷磁贴。不要在桌面/最近任务页点。"
+            textSize = 14f
+            setPadding(0, dp(14), 0, dp(4))
+        })
+        val captureModeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        captureModeRow.addView(button("下次：新建转录") { armCapture(false) }, weight())
+        captureModeRow.addView(button("下次：追加一页") { armCapture(true) }, weight())
+        content.addView(captureModeRow)
         content.addView(button("打开无障碍设置") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }, full())
@@ -89,26 +112,41 @@ class MainActivity : Activity() {
             setPadding(0, dp(10), 0, dp(10))
         }
         content.addView(status)
+        warningView = TextView(this).apply { textSize = 13f; setPadding(0, 0, 0, dp(8)) }
+        content.addView(warningView)
         titleEditor = EditText(this).apply {
             hint = "标题"
             inputType = InputType.TYPE_CLASS_TEXT
         }
         content.addView(titleEditor, full())
+        content.addView(TextView(this).apply { text = "结构化订单（可修正）"; textSize = 16f; setPadding(0, dp(10), 0, 0) })
+        platformEditor = edit("平台，例如拼多多")
+        merchantEditor = edit("商家/店铺")
+        orderNumberEditor = edit("订单号")
+        paidEditor = edit("实付金额，例如 7.90", InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
+        orderStatusEditor = edit("订单状态")
+        orderedAtEditor = edit("下单时间")
+        listOf(platformEditor, merchantEditor, orderNumberEditor, paidEditor, orderStatusEditor, orderedAtEditor)
+            .forEach { content.addView(it, full()) }
         itemContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(itemContainer, full())
-        rawEditor = EditText(this).apply {
-            hint = "当前页文字；你可以在发送前修正"
-            gravity = Gravity.TOP
-            minLines = 10
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-        }
-        content.addView(rawEditor, full())
 
         val outputRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         outputRow.addView(button("复制 Markdown") { copyMarkdown() }, weight())
         outputRow.addView(button("发送 Inbox") { sendInbox() }, weight())
         content.addView(outputRow)
         content.addView(button("查重并建立实体…") { requestEntityDraft() }, full())
+
+        rawEditor = EditText(this).apply {
+            hint = "原始转录（已去敏）；你可以在发送前修正"
+            gravity = Gravity.TOP
+            minLines = 8
+            maxLines = 14
+            maxHeight = dp(300)
+            isVerticalScrollBarEnabled = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        }
+        content.addView(rawEditor, full())
         content.addView(button("清空本次会话") {
             current = null
             store.saveSession(null)
@@ -117,13 +155,43 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
-    private fun requestCapture(append: Boolean) {
-        if (!CaptureAccessibilityService.requestCapture(append)) {
-            status.text = "请先启用“提取当前页面”无障碍服务"
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    private fun armCapture(append: Boolean) {
+        CaptureAccessibilityService.armNextCapture(append)
+        status.text = if (append) {
+            "已设定下次为“追加”；请回到订单页滚动后，点无障碍按钮/快捷磁贴"
         } else {
-            status.text = if (append) "正在读取并追加当前页…" else "正在读取当前页…"
+            "已设定下次为“新建”；请回到订单页点无障碍按钮/快捷磁贴"
         }
+    }
+
+    private fun scanPairingQr() {
+        status.text = "请扫描 Mac 上 runtime/pairing-qr.svg"
+        val options = GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAutoZoom()
+            .allowManualInput()
+            .build()
+        GmsBarcodeScanning.getClient(this, options).startScan()
+            .addOnSuccessListener { barcode -> applyPairingValue(barcode.rawValue.orEmpty()) }
+            .addOnCanceledListener { status.text = "已取消扫码" }
+            .addOnFailureListener { error ->
+                status.text = "扫码不可用：${error.message ?: "Google 扫码模块未就绪"}；可改用“粘贴配对链接”"
+            }
+    }
+
+    private fun pastePairingLink() {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val value = clipboard.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        applyPairingValue(value)
+    }
+
+    private fun applyPairingValue(value: String) {
+        val trimmed = value.trim()
+        if (!trimmed.startsWith("ordercapture://pair")) {
+            status.text = "未找到有效配对链接；应以 ordercapture://pair 开头"
+            return
+        }
+        pair(Uri.parse(trimmed))
     }
 
     private fun handleIntent(intent: Intent) {
@@ -133,12 +201,13 @@ class MainActivity : Activity() {
             return
         }
         if (intent.action != Intent.ACTION_SEND) return
+        val sourcePackage = referrer?.authority.orEmpty()
         when {
             intent.type?.startsWith("text/") == true -> {
                 val shared = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString().orEmpty()
                 if (shared.isNotBlank()) {
                     val url = Regex("https?://\\S+").find(shared)?.value.orEmpty()
-                    val envelope = OrderParser.parse(shared, intent.`package`.orEmpty(), url)
+                    val envelope = OrderParser.parse(shared, sourcePackage, url)
                     CaptureCoordinator.publish(this, envelope, append = false)
                     current = store.loadSession()
                 }
@@ -146,7 +215,7 @@ class MainActivity : Activity() {
             intent.type?.startsWith("image/") == true -> {
                 @Suppress("DEPRECATION")
                 val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-                if (uri != null) recognizeSharedImage(uri)
+                if (uri != null) recognizeSharedImage(uri, sourcePackage)
             }
         }
     }
@@ -164,13 +233,14 @@ class MainActivity : Activity() {
             require(config.certificateSha256.matches(Regex("[0-9a-fA-F]{64}"))) { "证书指纹无效" }
             store.savePairing(config)
             status.text = "已与 Mac 接收端配对"
+            renderPairingStatus()
             Toast.makeText(this, "Mac 配对成功", Toast.LENGTH_LONG).show()
         } catch (error: Exception) {
             status.text = "配对失败：${error.message}"
         }
     }
 
-    private fun recognizeSharedImage(uri: Uri) {
+    private fun recognizeSharedImage(uri: Uri, sourcePackage: String) {
         status.text = "正在本地识别分享的图片…"
         try {
             val bitmap = contentResolver.openInputStream(uri).use { stream -> BitmapFactory.decodeStream(stream) }
@@ -179,7 +249,7 @@ class MainActivity : Activity() {
                 bitmap.recycle()
                 runOnUiThread {
                     result.onSuccess { recognized ->
-                        val envelope = OrderParser.parse(recognized.text)
+                        val envelope = OrderParser.parse(recognized.text, sourcePackage, fromOcr = true)
                         envelope.warnings += "内容来自分享图片的本地 OCR，请核对数字"
                         if (recognized.lowConfidenceSegments > 0) {
                             envelope.warnings += "OCR 已在原文标出 ${recognized.lowConfidenceSegments} 个低置信片段"
@@ -196,14 +266,22 @@ class MainActivity : Activity() {
     }
 
     private fun renderCurrent() {
+        renderPairingStatus()
         current = store.loadSession() ?: current
         val envelope = current
         titleEditor.setText(envelope?.title.orEmpty())
+        platformEditor.setText(envelope?.order?.platform.orEmpty())
+        merchantEditor.setText(envelope?.order?.merchant.orEmpty())
+        orderNumberEditor.setText(envelope?.order?.orderNumber.orEmpty())
+        paidEditor.setText(envelope?.order?.totalPaid?.let { formatNumber(it) }.orEmpty())
+        orderStatusEditor.setText(envelope?.order?.status.orEmpty())
+        orderedAtEditor.setText(envelope?.order?.orderedAt.orEmpty())
         rawEditor.setText(envelope?.rawText.orEmpty())
         itemContainer.removeAllViews()
         itemRows.clear()
         if (envelope == null) {
             status.text = if (store.loadPairing() == null) "尚未配对；先在 Mac 生成并扫描配对二维码" else "等待提取页面"
+            warningView.text = ""
             return
         }
         status.text = buildString {
@@ -212,6 +290,7 @@ class MainActivity : Activity() {
             append(" · ${envelope.rawText.lineSequence().count()} 行")
             if (envelope.warnings.isNotEmpty()) append(" · ${envelope.warnings.size} 项待核对")
         }
+        warningView.text = envelope.warnings.distinct().joinToString("\n") { "• $it" }
         if (envelope.kind == "order") {
             itemContainer.addView(TextView(this).apply { text = "商品（发送前可修正）"; textSize = 16f })
             envelope.order.items.forEachIndexed { index, item ->
@@ -226,15 +305,31 @@ class MainActivity : Activity() {
 
     private fun syncEditors(): CaptureEnvelope? {
         val original = current ?: return null
-        val reparsed = OrderParser.parse(rawEditor.text.toString(), original.sourceApp, original.sourceUrl)
+        val reparsed = OrderParser.parse(
+            rawEditor.text.toString(),
+            original.sourceApp,
+            original.sourceUrl,
+            fromOcr = original.warnings.any { it.contains("OCR") },
+        )
         reparsed.captureId = original.captureId
         reparsed.capturedAt = original.capturedAt
         reparsed.title = titleEditor.text.toString().trim().ifBlank { reparsed.title }
+        reparsed.order.platform = platformEditor.text.toString().trim()
+        reparsed.order.merchant = merchantEditor.text.toString().trim()
+        reparsed.order.orderNumber = orderNumberEditor.text.toString().trim()
+        val manualPaid = paidEditor.text.toString().trim().replace(',', '.').toDoubleOrNull()
+        reparsed.order.totalPaid = manualPaid
+        if (manualPaid != null) reparsed.warnings.removeAll { it.contains("实付金额") }
+        reparsed.order.status = orderStatusEditor.text.toString().trim()
+        reparsed.order.orderedAt = orderedAtEditor.text.toString().trim()
         if (itemRows.isNotEmpty()) {
             itemRows.forEachIndexed { index, row ->
-                if (index < reparsed.order.items.size) {
-                    reparsed.order.items[index].name = row.name.text.toString().trim()
-                    reparsed.order.items[index].specification = row.spec.text.toString().trim()
+                val existing = reparsed.order.items.getOrNull(index)
+                if (existing == null) {
+                    reparsed.order.items += CaptureItem(row.name.text.toString().trim(), row.spec.text.toString().trim())
+                } else {
+                    existing.name = row.name.text.toString().trim()
+                    existing.specification = row.spec.text.toString().trim()
                 }
             }
         }
@@ -370,6 +465,22 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun renderPairingStatus() {
+        val pairing = store.loadPairing()
+        pairingStatus.text = if (pairing == null) {
+            "未配对：不影响本地识别和复制，但不能发送到 Mac/Obsidian"
+        } else {
+            "已配对：${pairing.localUrl}" + if (pairing.tailscaleUrl.isNotBlank()) "\n备用：${pairing.tailscaleUrl}" else ""
+        }
+    }
+
+    private fun edit(hintText: String, type: Int = InputType.TYPE_CLASS_TEXT) = EditText(this).apply {
+        hint = hintText
+        inputType = type
+        maxLines = 2
+    }
+
+    private fun formatNumber(value: Double): String = String.format(java.util.Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.')
     private fun button(label: String, action: () -> Unit) = Button(this).apply { text = label; setOnClickListener { action() } }
     private fun full() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) }
     private fun weight() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) }

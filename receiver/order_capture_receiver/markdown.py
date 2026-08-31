@@ -9,11 +9,14 @@ from .models import CaptureEnvelope, CaptureItem
 
 
 SENSITIVE_LINE_RE = re.compile(
-    r"(?:收货(?:人|地址)|详细地址|联系电话|手机号码|手机号|银行卡|支付账号|快递单号|运单号|物流单号)\s*[:：]?",
+    r"(?:收货(?:人|地址)|详细地址|联系电话|手机号码|手机号|银行卡|支付账号|快[递遞]单号|运单号|物流单号)\s*[:：]?",
     re.IGNORECASE,
 )
 PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+MASKED_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d(?:[\d*＊•·xX\s]{3,10})\d{2,4}(?!\d)")
 CARD_RE = re.compile(r"(?i)(银行卡|卡号|支付账号)(\s*[:：]?\s*)[\d *-]{8,30}")
+PAYMENT_CARD_RE = re.compile(r"(?:银[行銀]|储[蓄蕴]|信用).*?卡|(?:卡|CARD)\s*[(*（]?\d{3,6}[)*）]?", re.IGNORECASE)
+ADDRESS_WORD_RE = re.compile(r"省|市|自治区|区|县|镇|街道|街|路|巷|村|社区|小区|花园|大厦|栋|室")
 ILLEGAL_FILENAME_RE = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
 
 
@@ -21,7 +24,14 @@ def redact_sensitive_text(text: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
     output: list[str] = []
     for line in text.splitlines():
-        if SENSITIVE_LINE_RE.search(line):
+        address_count = len(ADDRESS_WORD_RE.findall(line))
+        if (
+            SENSITIVE_LINE_RE.search(line)
+            or MASKED_PHONE_RE.search(line)
+            or PAYMENT_CARD_RE.search(line)
+            or address_count >= 2
+            or (address_count >= 1 and "展开" in line)
+        ):
             output.append("[已去除敏感字段]")
             warnings.append("已过滤地址、联系方式、支付账号或物流编号字段")
             continue

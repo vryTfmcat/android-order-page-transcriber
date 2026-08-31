@@ -73,10 +73,16 @@ class ReceiverTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_redaction_removes_sensitive_lines_and_phone(self) -> None:
-        text, warnings = redact_sensitive_text("订单号：ABC123\n收货地址：深圳\n联系 13800138000")
+        text, warnings = redact_sensitive_text(
+            "订单号：ABC123\n收货地址：深圳\n联系 13800138000\n"
+            "测试人 137****2476 深圳市宝安区\n深圳市龙华区人民路某小区\n"
+            "中国银行储蓄卡(2165)支付¥7.90"
+        )
         self.assertIn("订单号：ABC123", text)
         self.assertNotIn("深圳", text)
         self.assertNotIn("13800138000", text)
+        self.assertNotIn("137", text)
+        self.assertNotIn("2165", text)
         self.assertTrue(warnings)
 
     def test_inbox_is_idempotent_and_contains_no_sensitive_text(self) -> None:

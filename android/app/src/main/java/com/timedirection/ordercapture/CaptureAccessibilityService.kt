@@ -2,11 +2,13 @@ package com.timedirection.ordercapture
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityButtonController
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
 import android.hardware.HardwareBuffer
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -14,9 +16,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class CaptureAccessibilityService : AccessibilityService() {
     private val capturing = AtomicBoolean(false)
+    private var lastSnapshot: WindowSnapshot? = null
+    private var lastSnapshotAttempt = 0L
     private val accessibilityButtonCallback = object : AccessibilityButtonController.AccessibilityButtonCallback() {
         override fun onClicked(controller: AccessibilityButtonController) {
-            capture(append = false)
+            scheduleCapture(append = consumeAppendMode(), delayMillis = 180)
         }
     }
 
@@ -35,33 +39,62 @@ class CaptureAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val packageName = event?.packageName?.toString().orEmpty()
+        if (!isCaptureTarget(packageName)) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastSnapshotAttempt < 300) return
+        lastSnapshotAttempt = now
+        val root = rootInActiveWindow ?: return
+        try {
+            val rootPackage = root.packageName?.toString().orEmpty()
+            if (!isCaptureTarget(rootPackage)) return
+            val text = collectText(root)
+            if (text.length >= 20) lastSnapshot = WindowSnapshot(rootPackage, text, root.windowId, now)
+        } finally {
+            root.recycle()
+        }
+    }
     override fun onInterrupt() = Unit
 
     fun capture(append: Boolean) {
         if (!capturing.compareAndSet(false, true)) return
         val root = rootInActiveWindow
-        val packageName = root?.packageName?.toString().orEmpty()
-        val windowId = root?.windowId
-        val treeText = root?.let(::collectText).orEmpty()
+        val activePackage = root?.packageName?.toString().orEmpty()
+        val activeWindowId = root?.windowId
+        val activeText = root?.let(::collectText).orEmpty()
         root?.recycle()
-        if (treeText.length >= 80) {
-            finishWithText(treeText, packageName, append, usedOcr = false)
+
+        val activeIsTarget = isCaptureTarget(activePackage)
+        val recent = lastSnapshot?.takeIf { SystemClock.elapsedRealtime() - it.capturedAt < 120_000 }
+        val selected = if (activeIsTarget) {
+            WindowSnapshot(activePackage, activeText, activeWindowId ?: -1, SystemClock.elapsedRealtime())
+        } else {
+            recent
+        }
+        if (selected == null) {
+            fail("当前是桌面、最近任务或系统界面；请回到订单详情页后再点无障碍按钮/快捷磁贴")
             return
         }
-        takeWindowScreenshot(packageName, treeText, append, windowId)
+        if (selected.text.length >= 80 || !activeIsTarget) {
+            finishWithText(selected.text, selected.packageName, append, usedOcr = false)
+            return
+        }
+        takeWindowScreenshot(selected.packageName, selected.text, append, selected.windowId)
     }
 
     private fun collectText(root: AccessibilityNodeInfo): String {
         val entries = mutableListOf<Triple<Int, Int, String>>()
         fun visit(node: AccessibilityNodeInfo) {
-            val value = sequenceOf(node.text, node.contentDescription, node.hintText, node.stateDescription)
+            val values = sequenceOf(node.text, node.contentDescription, node.hintText, node.stateDescription)
                 .mapNotNull { it?.toString()?.trim() }
-                .firstOrNull { it.isNotBlank() }
-            if (value != null) {
+                .filter { it.isNotBlank() }
+                .distinct()
+                .toList()
+            if (values.isNotEmpty()) {
                 val bounds = android.graphics.Rect()
                 node.getBoundsInScreen(bounds)
-                entries += Triple(bounds.top, bounds.left, value)
+                values.forEach { value -> entries += Triple(bounds.top, bounds.left, value) }
             }
             for (index in 0 until node.childCount) node.getChild(index)?.let { child ->
                 visit(child)
@@ -123,7 +156,7 @@ class CaptureAccessibilityService : AccessibilityService() {
         usedOcr: Boolean,
         lowConfidenceSegments: Int = 0,
     ) {
-        val envelope = OrderParser.parse(text, packageName)
+        val envelope = OrderParser.parse(text, packageName, fromOcr = usedOcr)
         if (usedOcr) envelope.warnings += "本页使用本地 OCR，请重点核对商品名和数字"
         if (lowConfidenceSegments > 0) envelope.warnings += "OCR 已在原文标出 $lowConfidenceSegments 个低置信片段"
         capturing.set(false)
@@ -137,11 +170,38 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     companion object {
         @Volatile private var instance: CaptureAccessibilityService? = null
+        @Volatile private var nextCaptureAppend = false
 
-        fun requestCapture(append: Boolean): Boolean {
+        fun armNextCapture(append: Boolean) {
+            nextCaptureAppend = append
+        }
+
+        fun requestArmedCapture(delayMillis: Long = 0): Boolean {
             val service = instance ?: return false
-            service.capture(append)
+            service.scheduleCapture(consumeAppendMode(), delayMillis)
             return true
         }
+
+        private fun consumeAppendMode(): Boolean = nextCaptureAppend.also { nextCaptureAppend = false }
     }
+
+    private fun scheduleCapture(append: Boolean, delayMillis: Long) {
+        Handler(Looper.getMainLooper()).postDelayed({ capture(append) }, delayMillis)
+    }
+
+    private fun isCaptureTarget(packageName: String): Boolean {
+        if (packageName.isBlank()) return false
+        return packageName != applicationContext.packageName &&
+            packageName != "com.miui.home" &&
+            packageName != "com.android.systemui" &&
+            packageName != "com.android.settings" &&
+            !packageName.startsWith("com.miui.securitycenter")
+    }
+
+    private data class WindowSnapshot(
+        val packageName: String,
+        val text: String,
+        val windowId: Int,
+        val capturedAt: Long,
+    )
 }

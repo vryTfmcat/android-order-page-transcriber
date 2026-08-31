@@ -57,4 +57,62 @@ class OrderParserTest {
         assertTrue(result.order.items.isNotEmpty())
         assertNull(result.order.items.first().quantity)
     }
+
+    @Test
+    fun parsesPinduoduoOcrVariantsAndRejectsUncertainIntegerAmount() {
+        val result = OrderParser.parse(
+            """
+            〔您的订单开始拣货·待核对〕
+            测试人 137****2476 深圳市宝安区
+            深圳市龙华区人民路某小区 展开
+            洁柔家用纸品旗舰店品牌认证旗舰店
+            品牌洁柔悬挂式抽纸
+            纸4层加厚大包餐巾纸厕纸学生用
+            4提4000张【家用实惠】
+            订单編号:260831-111122223333444
+            下单时间:2026-08-31 00:38:53
+            多多支付
+            〔中国银行储蓄卡(2165)支付¥790·待核对〕
+            〔实付:¥79(免运费)·待核对〕
+            ¥13.49
+            x1
+            """.trimIndent(),
+        )
+        assertEquals("拼多多", result.order.platform)
+        assertEquals("260831-111122223333444", result.order.orderNumber)
+        assertEquals("洁柔家用纸品旗舰店", result.order.merchant)
+        assertEquals("打包中", result.order.status)
+        assertNull(result.order.totalPaid)
+        assertTrue(result.order.items.size == 1)
+        assertTrue(result.order.items.first().name.contains("纸"))
+        assertFalse(result.rawText.contains("137"))
+        assertFalse(result.rawText.contains("人民路"))
+        assertFalse(result.rawText.contains("2165"))
+        assertTrue(result.warnings.any { it.contains("小数点") })
+    }
+
+    @Test
+    fun parsesPaidAmountWithColonAndCurrencySymbol() {
+        val result = OrderParser.parse(
+            "拼多多\n订单编号:260831-111122223333444\n实付: ¥7.90(免运费)\n洁柔悬挂式抽纸 x1\n下单时间:2026-08-31 00:38:53",
+        )
+        assertEquals(7.9, result.order.totalPaid!!, 0.001)
+        assertEquals(1, result.order.items.first().quantity)
+    }
+
+    @Test
+    fun leavesShortIntegerOcrAmountForManualReviewButKeepsLargeInteger() {
+        val uncertain = OrderParser.parse(
+            "订单编号:260831-111122223333444\n实付:¥79\n洁柔抽纸 x1\n下单时间:2026-08-31 00:38:53",
+            fromOcr = true,
+        )
+        assertNull(uncertain.order.totalPaid)
+        assertTrue(uncertain.warnings.any { it.contains("小数点") })
+
+        val largeInteger = OrderParser.parse(
+            "订单编号:241006-111122223333444\n实付:¥4919\n实木转角书桌 x1\n下单时间:2024-10-06 16:47:44",
+            fromOcr = true,
+        )
+        assertEquals(4919.0, largeInteger.order.totalPaid!!, 0.001)
+    }
 }

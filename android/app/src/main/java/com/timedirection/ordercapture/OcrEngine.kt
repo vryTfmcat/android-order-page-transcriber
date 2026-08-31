@@ -19,7 +19,10 @@ object OcrEngine {
                 val marked = result.textBlocks.joinToString("\n") { block ->
                     block.lines.joinToString("\n") { line ->
                         var value = line.text
-                        line.elements.filter { it.confidence in 0f..<0.65f }.forEach { element ->
+                        line.elements.filter { element ->
+                            element.confidence in 0f..<0.35f &&
+                                (element.text.any(Char::isDigit) || element.text.any { it == '¥' || it == '￥' })
+                        }.forEach { element ->
                             value = value.replaceFirst(element.text, "〔${element.text}·待核对〕")
                             uncertain += 1
                         }
