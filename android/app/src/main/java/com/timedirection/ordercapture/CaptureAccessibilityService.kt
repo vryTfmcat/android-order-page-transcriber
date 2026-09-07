@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
 import java.util.concurrent.atomic.AtomicBoolean
 
 class CaptureAccessibilityService : AccessibilityService() {
@@ -58,7 +59,11 @@ class CaptureAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     fun capture(append: Boolean) {
-        if (!capturing.compareAndSet(false, true)) return
+        if (!capturing.compareAndSet(false, true)) {
+            feedback("正在处理上一页，请稍候")
+            return
+        }
+        feedback(if (append) "已触发：正在追加并识别当前页…" else "已触发：正在识别当前页…")
         val root = rootInActiveWindow
         val activePackage = root?.packageName?.toString().orEmpty()
         val activeWindowId = root?.windowId
@@ -76,10 +81,11 @@ class CaptureAccessibilityService : AccessibilityService() {
             fail("当前是桌面、最近任务或系统界面；请回到订单详情页后再点无障碍按钮/快捷磁贴")
             return
         }
-        if (selected.text.length >= 80 || !activeIsTarget) {
+        if (!shouldUseOcr(selected)) {
             finishWithText(selected.text, selected.packageName, append, usedOcr = false)
             return
         }
+        feedback("页面文字不完整，正在进行本地 OCR…")
         takeWindowScreenshot(selected.packageName, selected.text, append, selected.windowId)
     }
 
@@ -123,7 +129,9 @@ class CaptureAccessibilityService : AccessibilityService() {
                 OcrEngine.recognize(bitmap) { recognized ->
                     bitmap.recycle()
                     recognized.onSuccess { ocr ->
-                        val combined = listOf(treeText, ocr.text).filter { it.isNotBlank() }.joinToString("\n")
+                        // OCR follows visual reading order more reliably on canvas-heavy commerce apps.
+                        // Keep the accessibility tree as a fallback, but parse OCR text first.
+                        val combined = listOf(ocr.text, treeText).filter { it.isNotBlank() }.joinToString("\n")
                         if (combined.isBlank()) fail("当前页面没有可识别文字")
                         else finishWithText(combined, packageName, append, usedOcr = true, ocr.lowConfidenceSegments)
                     }.onFailure { fail("本地 OCR 失败：${it.message ?: "未知错误"}") }
@@ -187,6 +195,21 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     private fun scheduleCapture(append: Boolean, delayMillis: Long) {
         Handler(Looper.getMainLooper()).postDelayed({ capture(append) }, delayMillis)
+    }
+
+    private fun shouldUseOcr(snapshot: WindowSnapshot): Boolean {
+        val packageName = snapshot.packageName.lowercase()
+        if (packageName.contains("aweme")) return true
+        if (snapshot.text.length < 160) return true
+        val strongFields = listOf("订单号", "订单编号", "订单編号", "实付", "实付款", "下单时间")
+            .count { snapshot.text.contains(it) }
+        return strongFields < 2 && snapshot.text.contains("订单")
+    }
+
+    private fun feedback(message: String) {
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun isCaptureTarget(packageName: String): Boolean {

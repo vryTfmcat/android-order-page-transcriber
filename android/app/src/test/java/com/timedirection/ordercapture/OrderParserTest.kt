@@ -115,4 +115,51 @@ class OrderParserTest {
         )
         assertEquals(4919.0, largeInteger.order.totalPaid!!, 0.001)
     }
+
+    @Test
+    fun parsesDouyinOrderListAndIgnoresLiveRecommendations() {
+        val result = OrderParser.parse(
+            """
+            [已去除敏感字段]
+            更多
+            全部，按钮，未选中
+            待支付，1，按钮，未选中
+            待发货，4，按钮，已选中
+            待收货/使用，59，按钮，未选中
+            评价，99+，按钮，未选中
+            售后，，按钮，未选中
+            碱法原麦手作碱水面包
+            ¥24.90
+            联系商家
+            申请退款
+            修改地址
+            催发货
+            苏越陶瓷个体店
+            ¥20.00
+            直播中，小米官方旗舰店手机专场直播间，热度值1453，按钮
+            直播中，肖尧精品木料，热度值5，按钮
+            """.trimIndent(),
+            "com.ss.android.ugc.aweme",
+        )
+        assertEquals("order", result.kind)
+        assertEquals("抖音商城", result.order.platform)
+        assertEquals("待发货", result.order.status)
+        assertEquals("苏越陶瓷个体店", result.order.merchant)
+        assertTrue(result.order.items.any { it.name.contains("碱水面包") })
+        assertFalse(result.order.items.any { it.name.contains("直播") || it.name.contains("小米官方旗舰店") })
+    }
+
+    @Test
+    fun recognizesFragmentedDouyinCaptureAsOrderButDoesNotInventFields() {
+        val result = OrderParser.parse(
+            "打包中\n2\n4\n¥\n.7\n券后价\n.9\n9\n159\n新人价\n5380\n1820",
+            "com.ss.android.ugc.aweme",
+            fromOcr = true,
+        )
+        assertEquals("order", result.kind)
+        assertEquals("抖音商城", result.order.platform)
+        assertEquals("打包中", result.order.status)
+        assertNull(result.order.totalPaid)
+        assertTrue(result.order.items.isEmpty())
+    }
 }

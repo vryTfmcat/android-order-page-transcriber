@@ -25,23 +25,23 @@ object OrderParser {
     private val time = Regex(
         "(?:下单时间|创建时间|付款时间)\\s*[:：]?\\s*([0-9]{4}[-/.年][0-9]{1,2}[-/.月][0-9]{1,2}(?:日)?(?:\\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)?)",
     )
-    private val merchantLabel = Regex("(?:店铺|商家|门店)\\s*[:：]?\\s*(.{2,80})")
-    private val merchantSuffix = Regex("^(.{2,60}?(?:旗舰店|专卖店|专营店|官方店|自营店))")
+    private val merchantLabel = Regex("^(?:店铺|商家|门店)\\s*[:：]\\s*(.{2,80})$")
+    private val merchantSuffix = Regex("^(.{2,60}?(?:旗舰店|专卖店|专营店|官方店|自营店|个体店))")
     private val statusWords = listOf(
         "待到店使用", "您已确认收货", "交易成功", "退款成功", "交易完成", "交易关闭",
         "待付款", "待发货", "打包中", "拣货", "运输中", "待收货", "已发货", "已签收", "已完成",
         "已退货", "已取消", "待使用",
     )
-    private val orderHints = listOf("订单号", "订单编号", "订单編号", "实付款", "实付", "下单时间", "付款时间", "交易成功", "待收货", "券号")
+    private val orderHints = listOf("订单号", "订单编号", "订单編号", "实付款", "实付", "下单时间", "付款时间", "交易成功", "待收货", "待发货", "打包中", "券号")
     private val excludedItemHints = listOf(
         "订单", "实付", "付款", "总价", "合计", "收货", "地址", "手机号", "快递", "物流", "复制", "联系商家", "申请售后", "申请退款",
         "下单时间", "发货时间", "完成时间", "支付方式", "优惠", "运费", "数量", "店铺", "商家", "门店", "商品快照", "交易快照",
         "分享商品", "再买一单", "再次拼单", "确认收货", "修改地址", "查看物流", "更多信息", "订单备注", "设为匿名", "催发货",
         "价保", "无理由退货", "品牌认证", "官方正品", "正品", "补贴", "平台优惠", "到店自提", "适用门店", "使用须知",
-        "打开", "应用信息", "未加锁", "清理全部任务",
+        "打开", "应用信息", "未加锁", "清理全部任务", "直播中", "热度值", "券后价", "新人价",
     )
     private val productWords = listOf(
-        "纸", "巾", "桌", "书", "架", "柜", "板", "包", "盒", "肉", "笼", "充电", "数据线", "电池", "食品", "饮料", "杯", "灯", "机", "笔", "套", "刀", "锅", "床", "椅", "鞋", "衣", "裤", "眼镜", "护眼", "湿巾", "抽", "木浆",
+        "纸", "巾", "桌", "书", "架", "柜", "板", "包", "盒", "肉", "笼", "面包", "糕", "饼", "陶瓷", "充电", "数据线", "电池", "食品", "饮料", "杯", "灯", "机", "笔", "套", "刀", "锅", "床", "椅", "鞋", "衣", "裤", "眼镜", "护眼", "湿巾", "抽", "木浆",
     )
 
     data class Redaction(val text: String, val warnings: List<String>)
@@ -80,20 +80,30 @@ object OrderParser {
             .replace("號", "号")
             .replace("實", "实")
         val platform = detectPlatform(sourcePackage, normalized, sourceUrl)
-        val isOrder = orderHints.count { normalized.contains(it) } >= 2 || orderNumber.containsMatchIn(normalized)
+        val parseRawLines = orderRelevantLines(lines)
+        val parseLines = parseRawLines.map(::stripMarkers)
+        val parseText = parseLines.joinToString("\n")
+        val hasMoney = Regex("[¥￥]\\s*[0-9]").containsMatchIn(parseText) ||
+            ((parseText.contains('¥') || parseText.contains('￥')) && parseText.any(Char::isDigit))
+        val hasOrderState = statusWords.any { parseText.contains(it) }
+        val hasOrderActions = listOf("联系商家", "申请退款", "申请售后", "催发货", "查看物流")
+            .count { parseText.contains(it) } >= 2
+        val isOrder = orderHints.count { parseText.contains(it) } >= 2 ||
+            orderNumber.containsMatchIn(parseText) ||
+            (platform.isNotBlank() && hasMoney && (hasOrderState || hasOrderActions))
         val data = OrderData(platform = platform)
         val warnings = redacted.warnings.toMutableList()
         if (isOrder) {
-            data.orderNumber = orderNumber.find(normalized)?.groupValues?.get(1).orEmpty()
-            data.totalPaid = extractPaid(lines, warnings, fromOcr)
-            data.status = normalizedLines.asSequence()
+            data.orderNumber = orderNumber.find(parseText)?.groupValues?.get(1).orEmpty()
+            data.totalPaid = extractPaid(parseRawLines, warnings, fromOcr)
+            data.status = parseLines.asSequence()
                 .mapNotNull { line -> statusWords.firstOrNull { line.contains(it) } }
                 .firstOrNull().orEmpty()
                 .replace("您已确认收货", "交易成功")
                 .replace("拣货", "打包中")
-            data.orderedAt = time.find(normalized)?.groupValues?.get(1).orEmpty()
-            data.merchant = extractMerchant(normalizedLines)
-            data.items += extractItems(normalizedLines, data)
+            data.orderedAt = time.find(parseText)?.groupValues?.get(1).orEmpty()
+            data.merchant = extractMerchant(parseLines)
+            data.items += extractItems(parseLines, data)
         }
         val title = when {
             data.items.isNotEmpty() -> data.items.first().name.take(80)
@@ -133,14 +143,23 @@ object OrderParser {
     }
 
     private fun extractMerchant(lines: List<String>): String {
-        merchantLabel.find(lines.joinToString("\n"))?.groupValues?.get(1)?.trim()?.let { labeled ->
-            return labeled.substringBefore("\n").take(80)
+        lines.firstNotNullOfOrNull { line ->
+            merchantLabel.find(line)?.groupValues?.get(1)?.trim()?.take(80)
+        }?.let { labeled ->
+            return labeled
         }
         for (line in lines) {
             val match = merchantSuffix.find(line) ?: continue
             return match.groupValues[1].replace(Regex("[區区]?牌认证.*$"), "").trim()
         }
         return ""
+    }
+
+    private fun orderRelevantLines(lines: List<String>): List<String> {
+        val recommendationStart = lines.indexOfFirst { line ->
+            line.startsWith("直播中") || line.contains("热度值") || line.contains("猜你喜欢") || line.contains("为你推荐")
+        }
+        return if (recommendationStart > 0) lines.take(recommendationStart) else lines
     }
 
     fun merge(base: CaptureEnvelope?, addition: CaptureEnvelope): CaptureEnvelope {
