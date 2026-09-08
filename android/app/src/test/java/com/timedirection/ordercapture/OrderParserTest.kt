@@ -189,4 +189,73 @@ class OrderParserTest {
         assertEquals(1, result.order.items.first().quantity)
         assertFalse(result.title.contains("宏碁"))
     }
+
+    @Test
+    fun parsesFragmentedDouyinOrderDetailFields() {
+        val result = OrderParser.parse(
+            """
+            叮当布艺>
+            |商品总价
+            订单运费
+            实付款
+            订单编号
+            平台优惠満13减2
+            [已去除敏感字段]
+            交易快照
+            支付方式
+            下单时间
+            付款时间
+            发货时间
+            成交时间
+            叮当布艺特价窗纱样品纱帘...¥10.90
+            10.9
+            交易完成
+            x1
+            ¥10.90
+            ¥0.00
+            6929237223239417318 复制
+            -1.66
+            [已去除敏感字段]
+            Y9.24
+            2026-09-06 17:55:28
+            2026-09-06 17:55:29
+            抖音月付>
+            2026-09-06 18:15:14
+            2026-09-08 14:15:32
+            """.trimIndent(),
+            "com.ss.android.ugc.aweme",
+        )
+
+        assertEquals("抖音商城", result.order.platform)
+        assertEquals("叮当布艺", result.order.merchant)
+        assertEquals("6929237223239417318", result.order.orderNumber)
+        assertEquals(9.24, result.order.totalPaid!!, 0.001)
+        assertEquals("交易完成", result.order.status)
+        assertEquals("2026-09-06 17:55:28", result.order.orderedAt)
+        assertEquals(1, result.order.items.size)
+        assertTrue(result.order.items.first().name.startsWith("叮当布艺特价窗纱"))
+        assertEquals(1, result.order.items.first().quantity)
+        assertEquals(9.24, result.order.items.first().linePrice!!, 0.001)
+    }
+
+    @Test
+    fun redactsStandaloneTrackingNumberAndNormalizesPinduoduoShippingStatus() {
+        val result = OrderParser.parse(
+            """
+            拼多多
+            已按时发货
+            商品名称：测试支架,单价: 25.99 元,规格描述：黑色,数量：1个
+            实付：13.99元
+            订单编号：260907-112680015411169
+            快递单号：
+            JT5523990020319
+            下单时间：2026-09-07 18:15:37
+            """.trimIndent(),
+            "com.xunmeng.pinduoduo",
+        )
+
+        assertEquals("已发货", result.order.status)
+        assertFalse(result.rawText.contains("JT5523990020319"))
+        assertTrue(result.warnings.any { it.contains("物流编号") })
+    }
 }

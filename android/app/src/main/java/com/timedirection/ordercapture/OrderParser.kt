@@ -9,6 +9,7 @@ object OrderParser {
         "(收货人|收货地址|详细地址|联系电话|手机号码|手机号|银行卡|卡号|支付账号|快[递遞]单号|运单号|物流单号)\\s*[:：]?",
         RegexOption.IGNORE_CASE,
     )
+    private val standaloneTrackingNumber = Regex("^(?:JT|YT|SF|YTO|STO|ZTO|EMS)[0-9A-Z]{8,30}$", RegexOption.IGNORE_CASE)
     private val paymentCard = Regex("(银[行銀]|储[蓄蕴]|信用).*?卡|(卡|CARD)\\s*[(*（]?\\d{3,6}[)*）]?", RegexOption.IGNORE_CASE)
     private val addressWords = Regex("省|市|自治区|区|县|镇|街道|街|路|巷|村|社区|小区|花园|大厦|栋|室")
     private val uncertainMarker = Regex("〔([^\u3015]+?)·待核对〕")
@@ -31,11 +32,12 @@ object OrderParser {
     private val time = Regex(
         "(?:下单时间|创建时间|付款时间)\\s*[:：]?\\s*([0-9]{4}[-/.年][0-9]{1,2}[-/.月][0-9]{1,2}(?:日)?(?:\\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)?)",
     )
+    private val dateTimeValue = Regex("[0-9]{4}[-/.年][0-9]{1,2}[-/.月][0-9]{1,2}(?:日)?\\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?")
     private val merchantLabel = Regex("^(?:店铺|商家|门店)\\s*[:：]\\s*(.{2,80})$")
     private val merchantSuffix = Regex("^(.{2,60}?(?:旗舰店|专卖店|专营店|官方店|自营店|个体店))")
     private val statusWords = listOf(
         "待到店使用", "您已确认收货", "交易成功", "退款成功", "交易完成", "交易关闭",
-        "待付款", "待发货", "打包中", "拼团中", "拣货", "运输中", "待收货", "已发货", "已签收", "已完成",
+        "待付款", "待发货", "打包中", "拼团中", "拣货", "运输中", "待收货", "已按时发货", "已发货", "已签收", "已完成",
         "已退货", "已取消", "待使用",
     )
     private val orderHints = listOf("订单号", "订单编号", "订单編号", "实付款", "实付", "下单时间", "付款时间", "交易成功", "待收货", "待发货", "打包中", "券号")
@@ -71,6 +73,7 @@ object OrderParser {
 
     private fun looksSensitive(line: String): Boolean {
         if (sensitiveLabel.containsMatchIn(line) || phone.containsMatchIn(line) || maskedPhone.containsMatchIn(line)) return true
+        if (standaloneTrackingNumber.matches(line.replace(" ", ""))) return true
         if (paymentCard.containsMatchIn(stripMarkers(line))) return true
         val addressCount = addressWords.findAll(stripMarkers(line)).count()
         return addressCount >= 2 || (addressCount >= 1 && line.contains("展开"))
@@ -101,14 +104,25 @@ object OrderParser {
         val warnings = redacted.warnings.toMutableList()
         if (isOrder) {
             data.orderNumber = orderNumber.find(parseText)?.groupValues?.get(1).orEmpty()
+            if (data.orderNumber.isBlank() && platform == "抖音商城") {
+                data.orderNumber = extractFragmentedDouyinOrderNumber(parseLines)
+            }
             data.totalPaid = extractPaid(parseRawLines, warnings, fromOcr)
+                ?: if (platform == "抖音商城") extractFragmentedDouyinPaid(parseLines) else null
             data.status = parseLines.asSequence()
                 .mapNotNull { line -> statusWords.firstOrNull { line.contains(it) } }
                 .firstOrNull().orEmpty()
                 .replace("您已确认收货", "交易成功")
                 .replace("拣货", "打包中")
+                .replace("已按时发货", "已发货")
             data.orderedAt = time.find(parseText)?.groupValues?.get(1).orEmpty()
+            if (data.orderedAt.isBlank() && platform == "抖音商城" && parseLines.any { it.trimStart('|').trim() == "下单时间" }) {
+                data.orderedAt = parseLines.firstNotNullOfOrNull { dateTimeValue.find(it)?.value }.orEmpty()
+            }
             data.merchant = extractMerchant(parseLines)
+            if (data.merchant.isBlank() && platform == "抖音商城") {
+                data.merchant = extractFragmentedDouyinMerchant(parseLines)
+            }
             data.items += extractItems(parseLines, data)
         }
         val title = when {
@@ -146,6 +160,32 @@ object OrderParser {
             return token.toDoubleOrNull()
         }
         return null
+    }
+
+    private fun extractFragmentedDouyinOrderNumber(lines: List<String>): String = lines.firstNotNullOfOrNull { line ->
+        Regex("(?<!\\d)(\\d{16,24})(?!\\d).*复制").find(line)?.groupValues?.get(1)
+    }.orEmpty()
+
+    private fun extractFragmentedDouyinPaid(lines: List<String>): Double? {
+        if (lines.none { it.trimStart('|').trim() == "实付款" }) return null
+        val firstDate = lines.indexOfFirst { dateTimeValue.containsMatchIn(it) }.let { if (it < 0) lines.size else it }
+        val candidates = lines.take(firstDate).mapNotNull { line ->
+            Regex("^[¥￥Yy]\\s*([0-9]+(?:[.,][0-9]{1,2})?)$")
+                .find(line.trim())
+                ?.groupValues
+                ?.get(1)
+                ?.replace(',', '.')
+                ?.toDoubleOrNull()
+        }
+        return candidates.lastOrNull()
+    }
+
+    private fun extractFragmentedDouyinMerchant(lines: List<String>): String {
+        val labelsStart = lines.indexOfFirst { it.contains("商品总价") }.let { if (it < 0) lines.size else it }
+        return lines.take(labelsStart).firstOrNull { line ->
+            val value = line.trim().trimEnd('>', '〉').trim()
+            value.length in 2..60 && value.any(Char::isLetter) && excludedItemHints.none { value.contains(it) }
+        }?.trim()?.trimEnd('>', '〉')?.trim().orEmpty()
     }
 
     private fun extractMerchant(lines: List<String>): String {
@@ -240,6 +280,24 @@ object OrderParser {
             return explicitItems
         }
 
+        if (data.platform == "抖音商城") {
+            val douyinProduct = lines.firstNotNullOfOrNull { line ->
+                val match = Regex("^(.{4,180}?)[¥￥Yy]\\s*[0-9]+(?:[.,][0-9]{1,2})?$").find(line.trim())
+                    ?: return@firstNotNullOfOrNull null
+                val name = match.groupValues[1].trim(' ', '-', '·', '，', ',', '。')
+                if (productScore(name) == Int.MIN_VALUE) null else name
+            }
+            if (!douyinProduct.isNullOrBlank()) {
+                return listOf(
+                    CaptureItem(
+                        name = douyinProduct,
+                        quantity = quantity.find(lines.joinToString("\n"))?.groupValues?.get(1)?.toIntOrNull(),
+                        linePrice = data.totalPaid,
+                    ),
+                )
+            }
+        }
+
         val indexedCandidates = lines.mapIndexedNotNull { index, raw ->
             val cleaned = cleanProductLine(raw)
             val score = productScore(cleaned)
@@ -291,6 +349,7 @@ object OrderParser {
         if (statusWords.any { line.contains(it) }) return Int.MIN_VALUE
         if (merchantSuffix.containsMatchIn(line)) return Int.MIN_VALUE
         if (line.startsWith("[") || line.matches(Regex("^(?:今天\\s*)?[0-9:. ]+$"))) return Int.MIN_VALUE
+        if (dateTimeValue.matches(line)) return Int.MIN_VALUE
         if (line.matches(Regex("^[¥￥]?[-+]?\\d+(?:\\.\\d{1,2})?$"))) return Int.MIN_VALUE
         var score = line.length.coerceAtMost(40)
         if (productWords.any { line.contains(it, ignoreCase = true) }) score += 22

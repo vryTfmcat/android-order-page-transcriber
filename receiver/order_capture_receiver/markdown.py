@@ -17,6 +17,7 @@ MASKED_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d(?:[\d*＊•·xX\s]{3,10})\d{2,4}
 CARD_RE = re.compile(r"(?i)(银行卡|卡号|支付账号)(\s*[:：]?\s*)[\d *-]{8,30}")
 PAYMENT_CARD_RE = re.compile(r"(?:银[行銀]|储[蓄蕴]|信用).*?卡|(?:卡|CARD)\s*[(*（]?\d{3,6}[)*）]?", re.IGNORECASE)
 ADDRESS_WORD_RE = re.compile(r"省|市|自治区|区|县|镇|街道|街|路|巷|村|社区|小区|花园|大厦|栋|室")
+STANDALONE_TRACKING_RE = re.compile(r"^(?:JT|YT|SF|YTO|STO|ZTO|EMS)[0-9A-Z]{8,30}$", re.IGNORECASE)
 ILLEGAL_FILENAME_RE = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
 
 
@@ -29,6 +30,7 @@ def redact_sensitive_text(text: str) -> tuple[str, list[str]]:
             SENSITIVE_LINE_RE.search(line)
             or MASKED_PHONE_RE.search(line)
             or PAYMENT_CARD_RE.search(line)
+            or STANDALONE_TRACKING_RE.fullmatch(line.replace(" ", ""))
             or address_count >= 2
             or (address_count >= 1 and "展开" in line)
         ):
