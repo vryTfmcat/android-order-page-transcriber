@@ -49,6 +49,7 @@ class MainActivity : Activity() {
     private lateinit var itemContainer: LinearLayout
     private var itemRows = mutableListOf<ItemEditRow>()
     private var current: CaptureEnvelope? = null
+    private var renderedSessionFingerprint = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +68,16 @@ class MainActivity : Activity() {
         handleIntent(intent)
         current = store.loadSession() ?: current
         renderCurrent()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!::store.isInitialized) return
+        val latest = store.loadSession()
+        if (latest != null && sessionFingerprint(latest) != renderedSessionFingerprint) {
+            current = latest
+            renderCurrent()
+        }
     }
 
     private fun buildUi() {
@@ -269,6 +280,7 @@ class MainActivity : Activity() {
         renderPairingStatus()
         current = store.loadSession() ?: current
         val envelope = current
+        renderedSessionFingerprint = sessionFingerprint(envelope)
         titleEditor.setText(envelope?.title.orEmpty())
         platformEditor.setText(envelope?.order?.platform.orEmpty())
         merchantEditor.setText(envelope?.order?.merchant.orEmpty())
@@ -301,6 +313,11 @@ class MainActivity : Activity() {
                 itemRows += ItemEditRow(name, spec)
             }
         }
+    }
+
+    private fun sessionFingerprint(envelope: CaptureEnvelope?): String {
+        if (envelope == null) return ""
+        return "${envelope.captureId}:${envelope.rawText.hashCode()}:${envelope.warnings.hashCode()}"
     }
 
     private fun syncEditors(): CaptureEnvelope? {

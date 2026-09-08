@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.Display
 import android.view.Gravity
 import android.view.View
@@ -73,10 +74,10 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     fun capture(append: Boolean) {
         if (!capturing.compareAndSet(false, true)) {
-            feedback("正在处理上一页，请稍候")
+            showProgressOverlay("正在处理上一页，请稍候…")
             return
         }
-        feedback(if (append) "已触发：正在追加并识别当前页…" else "已触发：正在识别当前页…")
+        showProgressOverlay(if (append) "正在追加并识别当前页…" else "正在识别当前页…")
         val root = rootInActiveWindow
         val activePackage = root?.packageName?.toString().orEmpty()
         val activeWindowId = root?.windowId
@@ -94,11 +95,12 @@ class CaptureAccessibilityService : AccessibilityService() {
             fail("当前是桌面、最近任务或系统界面；请回到订单详情页后再点无障碍按钮/快捷磁贴")
             return
         }
+        Log.i(LOG_TAG, "capture package=${selected.packageName} chars=${selected.text.length} append=$append")
         if (!shouldUseOcr(selected)) {
             finishWithText(selected.text, selected.packageName, append, usedOcr = false)
             return
         }
-        feedback("页面文字不完整，正在进行本地 OCR…")
+        showProgressOverlay("正在进行本地 OCR…")
         takeWindowScreenshot(selected.packageName, selected.text, append, selected.windowId)
     }
 
@@ -180,6 +182,7 @@ class CaptureAccessibilityService : AccessibilityService() {
         val envelope = OrderParser.parse(text, packageName, fromOcr = usedOcr)
         if (usedOcr) envelope.warnings += "本页使用本地 OCR，请重点核对商品名和数字"
         if (lowConfidenceSegments > 0) envelope.warnings += "OCR 已在原文标出 $lowConfidenceSegments 个低置信片段"
+        Log.i(LOG_TAG, "capture complete package=$packageName chars=${text.length} ocr=$usedOcr kind=${envelope.kind}")
         capturing.set(false)
         CaptureCoordinator.publish(this, envelope, append)
     }
@@ -190,6 +193,7 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        private const val LOG_TAG = "OrderCapture"
         @Volatile private var instance: CaptureAccessibilityService? = null
         @Volatile private var nextCaptureAppend = false
 
@@ -219,18 +223,20 @@ class CaptureAccessibilityService : AccessibilityService() {
         return strongFields < 2 && snapshot.text.contains("订单")
     }
 
-    private fun feedback(message: String) {
-        mainHandler.post {
-            Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
-        }
+    private fun showProgressOverlay(message: String) {
+        showOverlay(message, null, 15_000)
     }
 
     fun showResultOverlay(message: String, openIntent: android.content.Intent) {
+        showOverlay("$message\n点此查看转录结果", openIntent, 12_000)
+    }
+
+    private fun showOverlay(message: String, openIntent: android.content.Intent?, timeoutMillis: Long) {
         mainHandler.post {
             dismissResultOverlay()
             val density = resources.displayMetrics.density
             val view = TextView(this).apply {
-                text = "$message\n点此查看转录结果"
+                text = message
                 textSize = 15f
                 setTextColor(0xFFFFFFFF.toInt())
                 gravity = Gravity.CENTER
@@ -240,16 +246,20 @@ class CaptureAccessibilityService : AccessibilityService() {
                     setColor(0xE6232933.toInt())
                 }
                 elevation = 10 * density
-                setOnClickListener {
-                    dismissResultOverlay()
-                    startActivity(openIntent)
+                if (openIntent != null) {
+                    setOnClickListener {
+                        dismissResultOverlay()
+                        startActivity(openIntent)
+                    }
                 }
             }
+            val interactionFlags = if (openIntent == null) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or interactionFlags,
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -258,10 +268,10 @@ class CaptureAccessibilityService : AccessibilityService() {
             try {
                 (getSystemService(WINDOW_SERVICE) as WindowManager).addView(view, params)
                 resultOverlay = view
-                mainHandler.postDelayed({ if (resultOverlay === view) dismissResultOverlay() }, 12_000)
+                mainHandler.postDelayed({ if (resultOverlay === view) dismissResultOverlay() }, timeoutMillis)
             } catch (_: Exception) {
                 Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
-                startActivity(openIntent)
+                if (openIntent != null) startActivity(openIntent)
             }
         }
     }
