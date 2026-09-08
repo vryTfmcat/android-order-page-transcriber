@@ -4,14 +4,20 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityButtonController
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.HardwareBuffer
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Display
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.TextView
 import android.widget.Toast
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -19,6 +25,8 @@ class CaptureAccessibilityService : AccessibilityService() {
     private val capturing = AtomicBoolean(false)
     private var lastSnapshot: WindowSnapshot? = null
     private var lastSnapshotAttempt = 0L
+    private var resultOverlay: View? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val accessibilityButtonCallback = object : AccessibilityButtonController.AccessibilityButtonCallback() {
         override fun onClicked(controller: AccessibilityButtonController) {
             scheduleCapture(append = consumeAppendMode(), delayMillis = 180)
@@ -31,6 +39,7 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        dismissResultOverlay()
         try {
             accessibilityButtonController.unregisterAccessibilityButtonCallback(accessibilityButtonCallback)
         } catch (_: Exception) {
@@ -42,6 +51,10 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val packageName = event?.packageName?.toString().orEmpty()
+        if (packageName == applicationContext.packageName) {
+            dismissResultOverlay()
+            return
+        }
         if (!isCaptureTarget(packageName)) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastSnapshotAttempt < 300) return
@@ -207,8 +220,59 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     private fun feedback(message: String) {
-        Handler(Looper.getMainLooper()).post {
+        mainHandler.post {
             Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun showResultOverlay(message: String, openIntent: android.content.Intent) {
+        mainHandler.post {
+            dismissResultOverlay()
+            val density = resources.displayMetrics.density
+            val view = TextView(this).apply {
+                text = "$message\n点此查看转录结果"
+                textSize = 15f
+                setTextColor(0xFFFFFFFF.toInt())
+                gravity = Gravity.CENTER
+                setPadding((18 * density).toInt(), (11 * density).toInt(), (18 * density).toInt(), (11 * density).toInt())
+                background = GradientDrawable().apply {
+                    cornerRadius = 14 * density
+                    setColor(0xE6232933.toInt())
+                }
+                elevation = 10 * density
+                setOnClickListener {
+                    dismissResultOverlay()
+                    startActivity(openIntent)
+                }
+            }
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = (72 * density).toInt()
+            }
+            try {
+                (getSystemService(WINDOW_SERVICE) as WindowManager).addView(view, params)
+                resultOverlay = view
+                mainHandler.postDelayed({ if (resultOverlay === view) dismissResultOverlay() }, 12_000)
+            } catch (_: Exception) {
+                Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+                startActivity(openIntent)
+            }
+        }
+    }
+
+    private fun dismissResultOverlay() {
+        val view = resultOverlay ?: return
+        resultOverlay = null
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view)
+        } catch (_: Exception) {
+            // The system may have already removed the accessibility overlay.
         }
     }
 

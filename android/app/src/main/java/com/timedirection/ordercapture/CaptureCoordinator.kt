@@ -12,22 +12,28 @@ object CaptureCoordinator {
         val store = SecureStore(context)
         val merged = if (append) OrderParser.merge(store.loadSession(), envelope) else envelope
         store.saveSession(merged)
-        Toast.makeText(context, "提取完成，正在打开预览", Toast.LENGTH_SHORT).show()
-        context.startActivity(
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra(EXTRA_CAPTURE_READY, true)
-            }
-        )
+        val previewIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_CAPTURE_READY, true)
+        }
+        if (context is CaptureAccessibilityService) {
+            context.showResultOverlay("提取完成", previewIntent)
+        } else {
+            Toast.makeText(context, "提取完成", Toast.LENGTH_SHORT).show()
+            context.startActivity(previewIntent)
+        }
     }
 
     fun error(context: Context, message: String) {
-        Toast.makeText(context, "提取失败：$message", Toast.LENGTH_LONG).show()
-        context.startActivity(
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra(EXTRA_CAPTURE_ERROR, message)
-            }
-        )
+        val errorIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_CAPTURE_ERROR, message)
+        }
+        if (context is CaptureAccessibilityService) {
+            context.showResultOverlay("提取失败：$message", errorIntent)
+        } else {
+            Toast.makeText(context, "提取失败：$message", Toast.LENGTH_LONG).show()
+            context.startActivity(errorIntent)
+        }
     }
 }
