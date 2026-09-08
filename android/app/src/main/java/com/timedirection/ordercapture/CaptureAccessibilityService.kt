@@ -1,7 +1,12 @@
 package com.timedirection.ordercapture
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityButtonController
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
 import android.graphics.PixelFormat
@@ -26,46 +31,47 @@ class CaptureAccessibilityService : AccessibilityService() {
     private val capturing = AtomicBoolean(false)
     private var lastSnapshot: WindowSnapshot? = null
     private var lastSnapshotAttempt = 0L
+    private var captureStartedAt = 0L
     private var resultOverlay: View? = null
+    private var captureBubble: TextView? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val accessibilityButtonCallback = object : AccessibilityButtonController.AccessibilityButtonCallback() {
-        override fun onClicked(controller: AccessibilityButtonController) {
-            scheduleCapture(append = consumeAppendMode(), delayMillis = 180)
-        }
-    }
 
     override fun onServiceConnected() {
         instance = this
-        accessibilityButtonController.registerAccessibilityButtonCallback(accessibilityButtonCallback)
+        Log.i(LOG_TAG, "service connected; showing app-owned capture bubble")
+        startCaptureForeground()
+        showCaptureBubble()
     }
 
     override fun onDestroy() {
         dismissResultOverlay()
-        try {
-            accessibilityButtonController.unregisterAccessibilityButtonCallback(accessibilityButtonCallback)
-        } catch (_: Exception) {
-            // The controller can disappear while the service is being disabled.
-        }
+        dismissCaptureBubble()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         if (instance === this) instance = null
         super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val packageName = event?.packageName?.toString().orEmpty()
-        if (packageName == applicationContext.packageName) {
-            dismissResultOverlay()
+        val root = rootInActiveWindow ?: return
+        val packageName = root.packageName?.toString().orEmpty()
+        val targetIsCapturable = isCaptureTarget(packageName)
+        val desiredVisibility = if (targetIsCapturable) View.VISIBLE else View.GONE
+        if (captureBubble?.visibility != desiredVisibility) {
+            captureBubble?.visibility = desiredVisibility
+        }
+        if (!targetIsCapturable) {
+            root.recycle()
             return
         }
-        if (!isCaptureTarget(packageName)) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastSnapshotAttempt < 300) return
+        if (now - lastSnapshotAttempt < 300) {
+            root.recycle()
+            return
+        }
         lastSnapshotAttempt = now
-        val root = rootInActiveWindow ?: return
         try {
-            val rootPackage = root.packageName?.toString().orEmpty()
-            if (!isCaptureTarget(rootPackage)) return
             val text = collectText(root)
-            if (text.length >= 20) lastSnapshot = WindowSnapshot(rootPackage, text, root.windowId, now)
+            if (text.length >= 20) lastSnapshot = WindowSnapshot(packageName, text, root.windowId, now)
         } finally {
             root.recycle()
         }
@@ -77,6 +83,7 @@ class CaptureAccessibilityService : AccessibilityService() {
             showProgressOverlay("正在处理上一页，请稍候…")
             return
         }
+        captureStartedAt = SystemClock.elapsedRealtime()
         showProgressOverlay(if (append) "正在追加并识别当前页…" else "正在识别当前页…")
         val root = rootInActiveWindow
         val activePackage = root?.packageName?.toString().orEmpty()
@@ -115,7 +122,11 @@ class CaptureAccessibilityService : AccessibilityService() {
             if (values.isNotEmpty()) {
                 val bounds = android.graphics.Rect()
                 node.getBoundsInScreen(bounds)
-                values.forEach { value -> entries += Triple(bounds.top, bounds.left, value) }
+                val displayHeight = resources.displayMetrics.heightPixels
+                val visibleBounds = bounds.width() > 0 && bounds.height() > 0 && bounds.bottom > 0 && bounds.top < displayHeight
+                if (visibleBounds && node.isVisibleToUser) {
+                    values.forEach { value -> entries += Triple(bounds.top, bounds.left, value) }
+                }
             }
             for (index in 0 until node.childCount) node.getChild(index)?.let { child ->
                 visit(child)
@@ -183,8 +194,12 @@ class CaptureAccessibilityService : AccessibilityService() {
         if (usedOcr) envelope.warnings += "本页使用本地 OCR，请重点核对商品名和数字"
         if (lowConfidenceSegments > 0) envelope.warnings += "OCR 已在原文标出 $lowConfidenceSegments 个低置信片段"
         Log.i(LOG_TAG, "capture complete package=$packageName chars=${text.length} ocr=$usedOcr kind=${envelope.kind}")
-        capturing.set(false)
-        CaptureCoordinator.publish(this, envelope, append)
+        val minimumFeedbackMillis = 500L
+        val remaining = (minimumFeedbackMillis - (SystemClock.elapsedRealtime() - captureStartedAt)).coerceAtLeast(0L)
+        mainHandler.postDelayed({
+            capturing.set(false)
+            CaptureCoordinator.publish(this, envelope, append)
+        }, remaining)
     }
 
     private fun fail(message: String) {
@@ -194,6 +209,8 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val LOG_TAG = "OrderCapture"
+        private const val NOTIFICATION_CHANNEL_ID = "order_capture_service"
+        private const val NOTIFICATION_ID = 43117
         @Volatile private var instance: CaptureAccessibilityService? = null
         @Volatile private var nextCaptureAppend = false
 
@@ -206,6 +223,8 @@ class CaptureAccessibilityService : AccessibilityService() {
             service.scheduleCapture(consumeAppendMode(), delayMillis)
             return true
         }
+
+        fun isConnected(): Boolean = instance != null
 
         private fun consumeAppendMode(): Boolean = nextCaptureAppend.also { nextCaptureAppend = false }
     }
@@ -232,7 +251,7 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     private fun showOverlay(message: String, openIntent: android.content.Intent?, timeoutMillis: Long) {
-        mainHandler.post {
+        val action: () -> Unit = {
             dismissResultOverlay()
             val density = resources.displayMetrics.density
             val view = TextView(this).apply {
@@ -273,7 +292,9 @@ class CaptureAccessibilityService : AccessibilityService() {
                 Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
                 if (openIntent != null) startActivity(openIntent)
             }
+            Unit
         }
+        if (Looper.myLooper() == Looper.getMainLooper()) action() else mainHandler.post(action)
     }
 
     private fun dismissResultOverlay() {
@@ -283,6 +304,99 @@ class CaptureAccessibilityService : AccessibilityService() {
             (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view)
         } catch (_: Exception) {
             // The system may have already removed the accessibility overlay.
+        }
+    }
+
+    private fun showCaptureBubble() {
+        if (captureBubble != null) return
+        val density = resources.displayMetrics.density
+        val view = TextView(this).apply {
+            text = "取"
+            contentDescription = "提取当前页面"
+            textSize = 18f
+            setTextColor(0xFFFFFFFF.toInt())
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xE62F6FED.toInt())
+                setStroke((2 * density).toInt(), 0xCCFFFFFF.toInt())
+            }
+            elevation = 10 * density
+            setOnClickListener { capture(consumeAppendMode()) }
+            visibility = View.GONE
+        }
+        val size = (54 * density).toInt()
+        val params = WindowManager.LayoutParams(
+            size,
+            size,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            x = (8 * density).toInt()
+        }
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(view, params)
+            captureBubble = view
+            Log.i(LOG_TAG, "capture bubble shown")
+        } catch (error: Exception) {
+            Log.e(LOG_TAG, "cannot show capture bubble", error)
+        }
+    }
+
+    private fun dismissCaptureBubble() {
+        val view = captureBubble ?: return
+        captureBubble = null
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view)
+        } catch (_: Exception) {
+            // The system may have already removed the accessibility overlay.
+        }
+    }
+
+    private fun startCaptureForeground() {
+        try {
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "页面转录服务",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "保持用户已启用的本地页面转录服务可用"
+                    setShowBadge(false)
+                }
+            )
+            val openApp = PendingIntent.getActivity(
+                this,
+                1,
+                Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val captureAction = PendingIntent.getBroadcast(
+                this,
+                2,
+                Intent(this, CaptureActionReceiver::class.java).setAction(CaptureActionReceiver.ACTION_CAPTURE),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val notification = Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setContentTitle("订单页面转录器已就绪")
+                .setContentText("在订单页点“取”，或点此通知的提取操作")
+                .setContentIntent(openApp)
+                .setOngoing(true)
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .addAction(Notification.Action.Builder(null, "提取当前页", captureAction).build())
+                .build()
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            Log.i(LOG_TAG, "foreground keep-alive started")
+        } catch (error: Exception) {
+            Log.e(LOG_TAG, "cannot start foreground keep-alive", error)
         }
     }
 

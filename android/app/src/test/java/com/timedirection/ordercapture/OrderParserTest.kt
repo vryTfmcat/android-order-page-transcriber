@@ -162,4 +162,31 @@ class OrderParserTest {
         assertNull(result.order.totalPaid)
         assertTrue(result.order.items.isEmpty())
     }
+
+    @Test
+    fun prioritizesPinduoduoStructuredProductAndParsesCommaSeparatedPaidAmount() {
+        val result = OrderParser.parse(
+            """
+            拼多多
+            返回
+            拼团中
+            Moriste魅丽家居
+            商品名称：ins餐具卡通陶瓷可爱碟子家用火锅调料调味小吃造型酱油零食碟子,单价: 4.55 元,规格描述：小吃碟 - 水壶,数量：1个
+            使用3元平台无门槛券,实付:,1.55元,(免运费)
+            订单编号： 260908-100180989491169
+            下单时间： 2026-09-08 09:01:09
+            【宏碁】OMR326无线鼠标充电静音轻量化USB台式笔记本电脑通用电池款
+            ¥14
+            """.trimIndent(),
+            "com.xunmeng.pinduoduo",
+        )
+        assertEquals("拼团中", result.order.status)
+        assertEquals("Moriste魅丽家居", result.order.merchant)
+        assertEquals(1.55, result.order.totalPaid!!, 0.001)
+        assertEquals(1, result.order.items.size)
+        assertTrue(result.order.items.first().name.startsWith("ins餐具"))
+        assertEquals("小吃碟 - 水壶", result.order.items.first().specification)
+        assertEquals(1, result.order.items.first().quantity)
+        assertFalse(result.title.contains("宏碁"))
+    }
 }

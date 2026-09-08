@@ -18,9 +18,15 @@ object OrderParser {
         RegexOption.IGNORE_CASE,
     )
     private val paidMoney = Regex(
-        "(?:实付(?:款)?|付款金额)\\s*[:：]?\\s*[¥￥]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)",
+        "(?:实付(?:款)?|付款金额)\\s*[:：]?\\s*[,，]?\\s*[¥￥]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)",
         RegexOption.IGNORE_CASE,
     )
+    private val explicitProduct = Regex(
+        "^(?:商品名称|商品名)\\s*[:：]\\s*(.+?)(?:[,，]\\s*(?:单价|规格描述|规格|数量)\\s*[:：].*)?$",
+        RegexOption.IGNORE_CASE,
+    )
+    private val explicitSpecification = Regex("(?:规格描述|规格)\\s*[:：]\\s*([^,，]+)")
+    private val explicitQuantity = Regex("数量\\s*[:：]\\s*([0-9]{1,4})")
     private val quantity = Regex("(?:数量\\s*[:：]?\\s*|[x×])([0-9]{1,4})", RegexOption.IGNORE_CASE)
     private val time = Regex(
         "(?:下单时间|创建时间|付款时间)\\s*[:：]?\\s*([0-9]{4}[-/.年][0-9]{1,2}[-/.月][0-9]{1,2}(?:日)?(?:\\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)?)",
@@ -29,7 +35,7 @@ object OrderParser {
     private val merchantSuffix = Regex("^(.{2,60}?(?:旗舰店|专卖店|专营店|官方店|自营店|个体店))")
     private val statusWords = listOf(
         "待到店使用", "您已确认收货", "交易成功", "退款成功", "交易完成", "交易关闭",
-        "待付款", "待发货", "打包中", "拣货", "运输中", "待收货", "已发货", "已签收", "已完成",
+        "待付款", "待发货", "打包中", "拼团中", "拣货", "运输中", "待收货", "已发货", "已签收", "已完成",
         "已退货", "已取消", "待使用",
     )
     private val orderHints = listOf("订单号", "订单编号", "订单編号", "实付款", "实付", "下单时间", "付款时间", "交易成功", "待收货", "待发货", "打包中", "券号")
@@ -152,6 +158,19 @@ object OrderParser {
             val match = merchantSuffix.find(line) ?: continue
             return match.groupValues[1].replace(Regex("[區区]?牌认证.*$"), "").trim()
         }
+        val productIndex = lines.indexOfFirst { explicitProduct.containsMatchIn(it) }
+        if (productIndex > 0) {
+            for (index in productIndex - 1 downTo (productIndex - 4).coerceAtLeast(0)) {
+                val candidate = lines[index].trim()
+                val rejected = candidate.length !in 2..60 ||
+                    candidate in listOf("拼多多", "返回") ||
+                    statusWords.any { candidate.contains(it) } ||
+                    excludedItemHints.any { candidate.contains(it) } ||
+                    candidate.startsWith("[") ||
+                    Regex("^[¥￥]?[-+]?\\d").containsMatchIn(candidate)
+                if (!rejected && candidate.any { it.isLetter() }) return candidate
+            }
+        }
         return ""
     }
 
@@ -206,6 +225,21 @@ object OrderParser {
     }
 
     private fun extractItems(lines: List<String>, data: OrderData): List<CaptureItem> {
+        val explicitItems = lines.mapNotNull { line ->
+            val match = explicitProduct.find(line) ?: return@mapNotNull null
+            val name = match.groupValues[1].trim(' ', ',', '，')
+            if (name.length < 2) return@mapNotNull null
+            CaptureItem(
+                name = name,
+                specification = explicitSpecification.find(line)?.groupValues?.get(1)?.trim().orEmpty(),
+                quantity = explicitQuantity.find(line)?.groupValues?.get(1)?.toIntOrNull(),
+            )
+        }.distinctBy { normalize(it.name) }.toMutableList()
+        if (explicitItems.isNotEmpty()) {
+            if (explicitItems.size == 1 && data.totalPaid != null) explicitItems[0].linePrice = data.totalPaid
+            return explicitItems
+        }
+
         val indexedCandidates = lines.mapIndexedNotNull { index, raw ->
             val cleaned = cleanProductLine(raw)
             val score = productScore(cleaned)

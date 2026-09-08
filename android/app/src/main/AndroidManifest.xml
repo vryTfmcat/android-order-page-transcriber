@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:allowBackup="false"
@@ -46,6 +48,7 @@
             android:name=".CaptureAccessibilityService"
             android:description="@string/accessibility_description"
             android:exported="false"
+            android:foregroundServiceType="specialUse"
             android:label="提取当前页面"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
@@ -54,7 +57,14 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled accessibility service for local page transcription" />
         </service>
+
+        <receiver
+            android:name=".CaptureActionReceiver"
+            android:exported="false" />
 
         <service
             android:name=".CaptureTileService"

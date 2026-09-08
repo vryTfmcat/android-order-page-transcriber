@@ -2,6 +2,8 @@ package com.timedirection.ordercapture
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.view.accessibility.AccessibilityManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -9,6 +11,8 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
@@ -36,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var store: SecureStore
     private lateinit var network: NetworkClient
     private lateinit var status: TextView
+    private lateinit var serviceStatus: TextView
     private lateinit var pairingStatus: TextView
     private lateinit var warningView: TextView
     private lateinit var titleEditor: EditText
@@ -50,6 +55,8 @@ class MainActivity : Activity() {
     private var itemRows = mutableListOf<ItemEditRow>()
     private var current: CaptureEnvelope? = null
     private var renderedSessionFingerprint = ""
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val refreshServiceStatus = Runnable { renderServiceStatus() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,11 +80,20 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (!::store.isInitialized) return
+        renderServiceStatus()
+        uiHandler.removeCallbacks(refreshServiceStatus)
+        uiHandler.postDelayed(refreshServiceStatus, 750)
+        uiHandler.postDelayed(refreshServiceStatus, 2_000)
         val latest = store.loadSession()
         if (latest != null && sessionFingerprint(latest) != renderedSessionFingerprint) {
             current = latest
             renderCurrent()
         }
+    }
+
+    override fun onPause() {
+        uiHandler.removeCallbacks(refreshServiceStatus)
+        super.onPause()
     }
 
     private fun buildUi() {
@@ -106,7 +122,7 @@ class MainActivity : Activity() {
         content.addView(pairingRow)
 
         content.addView(TextView(this).apply {
-            text = "采集方法：回到订单详情页，再点系统无障碍按钮或“提取页面”快捷磁贴。不要在桌面/最近任务页点。"
+            text = "采集方法：回到订单详情页，点屏幕左侧蓝色“取”按钮；也可使用“提取页面”快捷磁贴。右侧 Android 图标是系统快捷按钮，不是转录按钮。"
             textSize = 14f
             setPadding(0, dp(14), 0, dp(4))
         })
@@ -114,9 +130,25 @@ class MainActivity : Activity() {
         captureModeRow.addView(button("下次：新建转录") { armCapture(false) }, weight())
         captureModeRow.addView(button("下次：追加一页") { armCapture(true) }, weight())
         content.addView(captureModeRow)
-        content.addView(button("打开无障碍设置") {
+        content.addView(button("打开/修复无障碍服务") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }, full())
+        content.addView(button("打开应用后台设置") {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:$packageName"))
+            )
+        }, full())
+        content.addView(TextView(this).apply {
+            text = "小米/HyperOS：请在应用详情中将省电策略设为“无限制”并允许自启动，否则系统可能在几分钟后结束识别服务。"
+            textSize = 13f
+            setPadding(0, dp(6), 0, dp(4))
+        })
+        serviceStatus = TextView(this).apply {
+            textSize = 14f
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        content.addView(serviceStatus)
 
         status = TextView(this).apply {
             textSize = 14f
@@ -169,9 +201,9 @@ class MainActivity : Activity() {
     private fun armCapture(append: Boolean) {
         CaptureAccessibilityService.armNextCapture(append)
         status.text = if (append) {
-            "已设定下次为“追加”；请回到订单页滚动后，点无障碍按钮/快捷磁贴"
+            "已设定下次为“追加”；请回到订单页滚动后，点蓝色“取”按钮/快捷磁贴"
         } else {
-            "已设定下次为“新建”；请回到订单页点无障碍按钮/快捷磁贴"
+            "已设定下次为“新建”；请回到订单页点蓝色“取”按钮/快捷磁贴"
         }
     }
 
@@ -278,6 +310,7 @@ class MainActivity : Activity() {
 
     private fun renderCurrent() {
         renderPairingStatus()
+        renderServiceStatus()
         current = store.loadSession() ?: current
         val envelope = current
         renderedSessionFingerprint = sessionFingerprint(envelope)
@@ -313,6 +346,22 @@ class MainActivity : Activity() {
                 itemRows += ItemEditRow(name, spec)
             }
         }
+    }
+
+    private fun renderServiceStatus() {
+        if (!::serviceStatus.isInitialized) return
+        val manager = getSystemService(AccessibilityManager::class.java)
+        val enabled = manager
+            .getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .any { it.resolveInfo.serviceInfo.packageName == packageName }
+        val (message, color) = when {
+            !enabled -> "⚠ 尚未授权无障碍服务；点上方按钮开启“提取当前页面”" to 0xFFB3261E.toInt()
+            !CaptureAccessibilityService.isConnected() ->
+                "⚠ 系统显示已开启，但服务没有运行。请在无障碍页将顶部开关关闭后重新开启。" to 0xFFB3261E.toInt()
+            else -> "✓ 识别服务正在运行；订单页左侧会显示蓝色“取”按钮" to 0xFF137333.toInt()
+        }
+        serviceStatus.text = message
+        serviceStatus.setTextColor(color)
     }
 
     private fun sessionFingerprint(envelope: CaptureEnvelope?): String {
