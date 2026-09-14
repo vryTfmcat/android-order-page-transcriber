@@ -11,7 +11,7 @@ from .security import certificate_sha256, ensure_certificate, generate_token
 from .server import serve
 
 
-DEFAULT_VAULT = Path("/Users/a13713912476/Documents/Obsidian-codx")
+DEFAULT_VAULT = Path.home() / "Documents" / "Obsidian-codx"
 
 
 def _pairing_uri(config: ReceiverConfig) -> str:

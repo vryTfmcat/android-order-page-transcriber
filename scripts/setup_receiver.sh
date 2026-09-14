@@ -5,6 +5,10 @@ project_root=${0:A:h:h}
 tailnet_url=${1:-}
 local_name=$(/usr/sbin/scutil --get LocalHostName 2>/dev/null || /bin/hostname -s)
 local_host="${local_name}.local"
+vault_args=()
+if [[ -n ${ORDER_CAPTURE_VAULT:-} ]]; then
+  vault_args=(--vault "$ORDER_CAPTURE_VAULT")
+fi
 
 cd "$project_root"
 /usr/bin/python3 -m venv .venv
@@ -14,7 +18,7 @@ cd "$project_root"
 PYTHONPATH=receiver .venv/bin/python -m order_capture_receiver \
   --config "$project_root/runtime/config.json" \
   init \
-  --vault "/Users/a13713912476/Documents/Obsidian-codx" \
+  "${vault_args[@]}" \
   --runtime "$project_root/runtime" \
   --local-host "$local_host" \
   --tailscale-url "$tailnet_url"

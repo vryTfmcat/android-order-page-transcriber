@@ -62,6 +62,15 @@ class SecureStore(context: Context) {
     fun saveSession(envelope: CaptureEnvelope?) = put("session", envelope?.toJson()?.toString())
     fun loadSession(): CaptureEnvelope? = get("session")?.let { CaptureEnvelope.fromJson(JSONObject(it)) }
 
+    fun setAutoSendInbox(enabled: Boolean) = put("auto_send_inbox", enabled.toString())
+    fun isAutoSendInboxEnabled(): Boolean = get("auto_send_inbox")?.toBooleanStrictOrNull() ?: false
+
+    fun setKeepShippingAddress(enabled: Boolean) = put("keep_shipping_address", enabled.toString())
+    fun shouldKeepShippingAddress(): Boolean = get("keep_shipping_address")?.toBooleanStrictOrNull() ?: true
+
+    fun setCapturePlatform(value: String) = put("capture_platform", value.takeIf { it in PLATFORM_OPTIONS && it != "自动识别" })
+    fun loadCapturePlatformOverride(): String = get("capture_platform").orEmpty().takeIf { it in PLATFORM_OPTIONS } ?: ""
+
     fun enqueue(path: String, envelope: CaptureEnvelope) {
         val array = get("queue")?.let(::JSONArray) ?: JSONArray()
         if ((0 until array.length()).any { array.getJSONObject(it).optString("captureId") == envelope.captureId && array.getJSONObject(it).optString("path") == path }) return
@@ -84,5 +93,9 @@ class SecureStore(context: Context) {
             .filterNot { it.optString("captureId") == captureId && it.optString("path") == path }
             .forEach { retained.put(it) }
         put("queue", retained.toString())
+    }
+
+    companion object {
+        val PLATFORM_OPTIONS = listOf("自动识别", "抖省省", "抖音商城", "淘宝", "拼多多", "闲鱼", "京东", "美团", "小米商城")
     }
 }

@@ -19,6 +19,7 @@ object MarkdownFormatter {
             appendLine(if (order.totalPaid == null) "- 实付：待确认" else "- 实付：${money(order.totalPaid!!)} 元")
             appendLine("- 状态：${order.status.ifBlank { "待确认" }}")
             appendLine("- 下单时间：${order.orderedAt.ifBlank { "待确认" }}")
+            if (envelope.keepAddress) appendLine("- 收货地址：${order.shippingAddress.ifBlank { "待确认" }}")
             appendLine()
             appendLine("### 商品")
             appendLine()
@@ -33,7 +34,7 @@ object MarkdownFormatter {
             }
             appendLine()
         }
-        appendLine("## 原始转录（已去敏）")
+        appendLine("## 原始转录（已过滤电话、账号与物流单号）")
         appendLine()
         appendLine("```text")
         appendLine(envelope.rawText)

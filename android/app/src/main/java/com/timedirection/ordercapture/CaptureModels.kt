@@ -36,6 +36,7 @@ data class OrderData(
     var totalPaid: Double? = null,
     var status: String = "",
     var orderedAt: String = "",
+    var shippingAddress: String = "",
     val items: MutableList<CaptureItem> = mutableListOf(),
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
@@ -45,6 +46,7 @@ data class OrderData(
         put("totalPaid", totalPaid ?: JSONObject.NULL)
         put("status", status)
         put("orderedAt", orderedAt)
+        put("shippingAddress", shippingAddress)
         put("items", JSONArray().apply { items.forEach { put(it.toJson()) } })
     }
 
@@ -60,6 +62,7 @@ data class OrderData(
                 totalPaid = value.optDoubleOrNull("totalPaid"),
                 status = value.optString("status"),
                 orderedAt = value.optString("orderedAt"),
+                shippingAddress = value.optString("shippingAddress"),
                 items = items,
             )
         }
@@ -74,6 +77,7 @@ data class CaptureEnvelope(
     var title: String = "未命名页面转录",
     var kind: String = "generic",
     var rawText: String = "",
+    var keepAddress: Boolean = true,
     var order: OrderData = OrderData(),
     val warnings: MutableList<String> = mutableListOf(),
 ) {
@@ -86,6 +90,7 @@ data class CaptureEnvelope(
         put("title", title)
         put("kind", kind)
         put("rawText", rawText)
+        put("keepAddress", keepAddress)
         put("order", order.toJson())
         put("warnings", JSONArray(warnings))
     }
@@ -103,6 +108,7 @@ data class CaptureEnvelope(
                 title = value.optString("title", "未命名页面转录"),
                 kind = value.optString("kind", "generic"),
                 rawText = value.optString("rawText"),
+                keepAddress = value.optBoolean("keepAddress", true),
                 order = OrderData.fromJson(value.optJSONObject("order") ?: JSONObject()),
                 warnings = warnings,
             )

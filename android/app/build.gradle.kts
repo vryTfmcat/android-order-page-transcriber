@@ -11,8 +11,8 @@ android {
         applicationId = "com.timedirection.ordercapture"
         minSdk = 30
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.2.9"
+        versionCode = 20
+        versionName = "0.2.18"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }

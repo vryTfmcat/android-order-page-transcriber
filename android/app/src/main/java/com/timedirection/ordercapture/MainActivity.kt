@@ -50,6 +50,7 @@ class MainActivity : Activity() {
     private lateinit var paidEditor: EditText
     private lateinit var orderStatusEditor: EditText
     private lateinit var orderedAtEditor: EditText
+    private lateinit var shippingAddressEditor: EditText
     private lateinit var rawEditor: EditText
     private lateinit var itemContainer: LinearLayout
     private var itemRows = mutableListOf<ItemEditRow>()
@@ -126,6 +127,46 @@ class MainActivity : Activity() {
             textSize = 14f
             setPadding(0, dp(14), 0, dp(4))
         })
+        content.addView(CheckBox(this).apply {
+            text = "每次点“取”后自动发送到 Inbox"
+            isChecked = store.isAutoSendInboxEnabled()
+            setOnCheckedChangeListener { _, checked -> store.setAutoSendInbox(checked) }
+        }, full())
+        content.addView(TextView(this).apply {
+            text = "自动发送用于“新建转录”；Mac 离线时会加密排队。追加一页完成后仍在预览中手动发送。"
+            textSize = 12f
+        })
+        content.addView(CheckBox(this).apply {
+            text = "保留收货地址（用于判断购买用途）"
+            isChecked = store.shouldKeepShippingAddress()
+            setOnCheckedChangeListener { _, checked -> store.setKeepShippingAddress(checked) }
+        }, full())
+        content.addView(TextView(this).apply {
+            text = "地址会写入个人 Inbox；手机号、座机、支付卡号和物流单号仍会过滤。"
+            textSize = 12f
+        })
+        content.addView(TextView(this).apply {
+            text = "批量识别平台（默认自动；连续采集同一平台时可固定）"
+            textSize = 14f
+            setPadding(0, dp(6), 0, 0)
+        })
+        val platformMode = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                SecureStore.PLATFORM_OPTIONS,
+            )
+            val saved = store.loadCapturePlatformOverride().ifBlank { "自动识别" }
+            setSelection(SecureStore.PLATFORM_OPTIONS.indexOf(saved).coerceAtLeast(0))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    store.setCapturePlatform(SecureStore.PLATFORM_OPTIONS[position])
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        content.addView(platformMode, full())
         val captureModeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         captureModeRow.addView(button("下次：新建转录") { armCapture(false) }, weight())
         captureModeRow.addView(button("下次：追加一页") { armCapture(true) }, weight())
@@ -169,7 +210,8 @@ class MainActivity : Activity() {
         paidEditor = edit("实付金额，例如 7.90", InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
         orderStatusEditor = edit("订单状态")
         orderedAtEditor = edit("下单时间")
-        listOf(platformEditor, merchantEditor, orderNumberEditor, paidEditor, orderStatusEditor, orderedAtEditor)
+        shippingAddressEditor = edit("收货地址（可修正）")
+        listOf(platformEditor, merchantEditor, orderNumberEditor, paidEditor, orderStatusEditor, orderedAtEditor, shippingAddressEditor)
             .forEach { content.addView(it, full()) }
         itemContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(itemContainer, full())
@@ -181,7 +223,7 @@ class MainActivity : Activity() {
         content.addView(button("查重并建立实体…") { requestEntityDraft() }, full())
 
         rawEditor = EditText(this).apply {
-            hint = "原始转录（已去敏）；你可以在发送前修正"
+            hint = "原始转录（已过滤电话、账号与物流单号）；你可以在发送前修正"
             gravity = Gravity.TOP
             minLines = 8
             maxLines = 14
@@ -250,7 +292,13 @@ class MainActivity : Activity() {
                 val shared = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString().orEmpty()
                 if (shared.isNotBlank()) {
                     val url = Regex("https?://\\S+").find(shared)?.value.orEmpty()
-                    val envelope = OrderParser.parse(shared, sourcePackage, url)
+                    val envelope = OrderParser.parse(
+                        shared,
+                        sourcePackage,
+                        url,
+                        preserveAddress = store.shouldKeepShippingAddress(),
+                        platformOverride = store.loadCapturePlatformOverride(),
+                    )
                     CaptureCoordinator.publish(this, envelope, append = false)
                     current = store.loadSession()
                 }
@@ -292,11 +340,20 @@ class MainActivity : Activity() {
                 bitmap.recycle()
                 runOnUiThread {
                     result.onSuccess { recognized ->
-                        val envelope = OrderParser.parse(recognized.text, sourcePackage, fromOcr = true)
+                        val cleaned = OcrTextFusion.fuse("", recognized.text)
+                        val envelope = OrderParser.parse(
+                            cleaned.text,
+                            sourcePackage,
+                            fromOcr = true,
+                            preserveAddress = store.shouldKeepShippingAddress(),
+                            platformOverride = store.loadCapturePlatformOverride(),
+                        )
                         envelope.warnings += "内容来自分享图片的本地 OCR，请核对数字"
                         if (recognized.lowConfidenceSegments > 0) {
                             envelope.warnings += "OCR 已在原文标出 ${recognized.lowConfidenceSegments} 个低置信片段"
                         }
+                        val discarded = recognized.discardedLines + cleaned.discardedLines
+                        if (discarded > 0) envelope.warnings += "已忽略 $discarded 行低质量 OCR 文字"
                         CaptureCoordinator.publish(this, envelope, append = false)
                         current = store.loadSession()
                         renderCurrent()
@@ -321,6 +378,7 @@ class MainActivity : Activity() {
         paidEditor.setText(envelope?.order?.totalPaid?.let { formatNumber(it) }.orEmpty())
         orderStatusEditor.setText(envelope?.order?.status.orEmpty())
         orderedAtEditor.setText(envelope?.order?.orderedAt.orEmpty())
+        shippingAddressEditor.setText(envelope?.order?.shippingAddress.orEmpty())
         rawEditor.setText(envelope?.rawText.orEmpty())
         itemContainer.removeAllViews()
         itemRows.clear()
@@ -376,18 +434,26 @@ class MainActivity : Activity() {
             original.sourceApp,
             original.sourceUrl,
             fromOcr = original.warnings.any { it.contains("OCR") },
+            preserveAddress = store.shouldKeepShippingAddress(),
+            platformOverride = platformEditor.text.toString().trim(),
         )
         reparsed.captureId = original.captureId
         reparsed.capturedAt = original.capturedAt
+        original.warnings.forEach { warning ->
+            if (warning !in reparsed.warnings) reparsed.warnings += warning
+        }
         reparsed.title = titleEditor.text.toString().trim().ifBlank { reparsed.title }
         reparsed.order.platform = platformEditor.text.toString().trim()
         reparsed.order.merchant = merchantEditor.text.toString().trim()
         reparsed.order.orderNumber = orderNumberEditor.text.toString().trim()
+        if (reparsed.order.orderNumber.isNotBlank()) reparsed.warnings.removeAll { it.contains("订单号未识别") }
         val manualPaid = paidEditor.text.toString().trim().replace(',', '.').toDoubleOrNull()
         reparsed.order.totalPaid = manualPaid
         if (manualPaid != null) reparsed.warnings.removeAll { it.contains("实付金额") }
         reparsed.order.status = orderStatusEditor.text.toString().trim()
         reparsed.order.orderedAt = orderedAtEditor.text.toString().trim()
+        reparsed.order.shippingAddress = shippingAddressEditor.text.toString().trim()
+        reparsed.keepAddress = store.shouldKeepShippingAddress()
         if (itemRows.isNotEmpty()) {
             itemRows.forEachIndexed { index, row ->
                 val existing = reparsed.order.items.getOrNull(index)
@@ -397,6 +463,9 @@ class MainActivity : Activity() {
                     existing.name = row.name.text.toString().trim()
                     existing.specification = row.spec.text.toString().trim()
                 }
+            }
+            if (itemRows.any { it.name.text.toString().isNotBlank() }) {
+                reparsed.warnings.removeAll { it.contains("商品名称未可靠识别") }
             }
         }
         current = reparsed

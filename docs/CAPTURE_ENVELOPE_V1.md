@@ -11,7 +11,8 @@ Android 向 Mac 发送 UTF-8 JSON，图片永不进入协议。所有请求必�
   "sourceUrl": "https://example.invalid/order",
   "title": "商品名",
   "kind": "order",
-  "rawText": "去敏后、合并去重的可见文字",
+  "rawText": "已过滤电话、账号与物流单号的可见文字",
+  "keepAddress": true,
   "order": {
     "platform": "平台",
     "merchant": "商家",
@@ -19,6 +20,7 @@ Android 向 Mac 发送 UTF-8 JSON，图片永不进入协议。所有请求必�
     "totalPaid": 99.8,
     "status": "待收货",
     "orderedAt": "2026-08-31 12:30",
+    "shippingAddress": "深圳市……",
     "items": [
       {"name": "商品", "specification": "规格", "quantity": 2, "linePrice": 99.8}
     ]
@@ -58,6 +60,7 @@ Android 向 Mac 发送 UTF-8 JSON，图片永不进入协议。所有请求必�
 ## 约束
 
 - 请求体最大 1 MB，原文最大 50,000 字符，商品最多 100 个。
+- `keepAddress` 是可选扩展字段；缺省时 Mac 按 `false` 处理。为 `true` 时可写入 `shippingAddress`，但电话、支付卡号和物流单号仍过滤。
 - `purchasePrice` 只写订单行中确认的实付；总额不被拆分或反推。
 - `purchasedQuantity` 是订单数量，不是现场 `quantity`。
 - 批次数量未验证时为 `quantity: null` + `quantityStatus: unverified`。

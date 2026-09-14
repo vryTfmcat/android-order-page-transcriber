@@ -82,6 +82,7 @@ class OrderData:
     total_paid: float | None = None
     status: str = ""
     ordered_at: str = ""
+    shipping_address: str = ""
     items: tuple[CaptureItem, ...] = ()
 
     @classmethod
@@ -100,6 +101,7 @@ class OrderData:
             total_paid=_optional_number(value.get("totalPaid")),
             status=_text(value.get("status"), maximum=100),
             ordered_at=_text(value.get("orderedAt"), maximum=100),
+            shipping_address=_text(value.get("shippingAddress"), maximum=500),
             items=tuple(CaptureItem.from_dict(item) for item in raw_items),
         )
 
@@ -111,6 +113,7 @@ class OrderData:
             "totalPaid": self.total_paid,
             "status": self.status,
             "orderedAt": self.ordered_at,
+            "shippingAddress": self.shipping_address,
             "items": [item.to_dict() for item in self.items],
         }
 
@@ -125,6 +128,7 @@ class CaptureEnvelope:
     title: str
     kind: str
     raw_text: str
+    keep_address: bool
     order: OrderData
     warnings: tuple[str, ...]
 
@@ -149,6 +153,9 @@ class CaptureEnvelope:
         raw_text = _text(value.get("rawText"))
         if not raw_text:
             raise ValidationError("rawText is required")
+        keep_address = value.get("keepAddress", False)
+        if not isinstance(keep_address, bool):
+            raise ValidationError("keepAddress must be a boolean")
         raw_warnings = value.get("warnings", [])
         if not isinstance(raw_warnings, list) or len(raw_warnings) > 100:
             raise ValidationError("warnings must be a short array")
@@ -161,6 +168,7 @@ class CaptureEnvelope:
             title=_text(value.get("title"), maximum=500) or "未命名页面转录",
             kind=kind,
             raw_text=raw_text,
+            keep_address=keep_address,
             order=OrderData.from_dict(value.get("order")),
             warnings=tuple(_text(item, maximum=500) for item in raw_warnings),
         )
@@ -175,6 +183,7 @@ class CaptureEnvelope:
             "title": self.title,
             "kind": self.kind,
             "rawText": self.raw_text,
+            "keepAddress": self.keep_address,
             "order": self.order.to_dict(),
             "warnings": list(self.warnings),
         }

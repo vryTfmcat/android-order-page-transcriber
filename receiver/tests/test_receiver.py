@@ -75,16 +75,43 @@ class ReceiverTest(unittest.TestCase):
     def test_redaction_removes_sensitive_lines_and_phone(self) -> None:
         text, warnings = redact_sensitive_text(
             "订单号：ABC123\n收货地址：深圳\n联系 13800138000\n"
-            "测试人 137****2476 深圳市宝安区\n深圳市龙华区人民路某小区\n"
-            "中国银行储蓄卡(2165)支付¥7.90\n快递单号：\nYT8899256802680"
+            "测试人 138****0000 示例市测试区\n示例市测试区示例路某小区\n"
+            "测试用户 138+***0000 号码保护中\n"
+            "测试用户 138**\"0000 号码保护中\n"
+            "中国银行储蓄卡(2165)支付¥7.90\n快递单号：\nYT8899256802680\n"
+            "券号1242 9941 3621 250 ·复制"
+            "\n投诉电话0755-27035359、0755-36553673"
+            "\n【代收点】您的快件已投递,收件人凭取件码在"
+            "\n示例市测试区示例小区2期6栋东门店"
+            "\n单元213"
+            "\n微信交易号\n1\u200b1\u200b1\u200b2\u200b0\u200b6\u200b0\u200b0\u200b0\u200b2\u200b6\u200b0\u200b9\u200b0\u200b7\u200b6\u200b0\u200b2\u200b6\u200b7\u200b1\u200b0\u200b9\u200b3\u200b9\u200b6\u200b2\u200b4\u200b8"
         )
         self.assertIn("订单号：ABC123", text)
         self.assertNotIn("深圳", text)
         self.assertNotIn("13800138000", text)
-        self.assertNotIn("137", text)
+        self.assertNotIn("138", text)
+        self.assertNotIn("0000", text)
         self.assertNotIn("2165", text)
         self.assertNotIn("YT8899256802680", text)
+        self.assertNotIn("1242 9941 3621 250", text)
+        self.assertNotIn("99000000000000000000000000001", text)
+        self.assertNotIn("0755-", text)
+        self.assertNotIn("示例小区", text)
+        self.assertNotIn("单元213", text)
         self.assertTrue(warnings)
+
+    def test_inbox_redacts_sensitive_structured_title_and_item_fields(self) -> None:
+        payload = capture(capture_id="cap_01testcapture0009").to_dict()
+        payload["title"] = "0755-27035359 投诉电话"
+        payload["order"]["merchant"] = "测试商店 0755-36553673"
+        payload["order"]["items"][0]["name"] = "【代收点】您的快件已投递,收件人凭取件码在"
+        payload["order"]["items"][0]["specification"] = "示例市测试区示例小区2期6栋东门店"
+        result = self.storage.create_inbox_capture(CaptureEnvelope.from_dict(payload))
+        content = (self.vault / result["path"]).read_text(encoding="utf-8")
+        self.assertNotIn("0755-", result["path"])
+        self.assertNotIn("0755-", content)
+        self.assertNotIn("示例小区", content)
+        self.assertNotIn("您的快件", content)
 
     def test_inbox_is_idempotent_and_contains_no_sensitive_text(self) -> None:
         first = self.storage.create_inbox_capture(capture())
@@ -94,6 +121,19 @@ class ReceiverTest(unittest.TestCase):
         content = (self.vault / first["path"]).read_text(encoding="utf-8")
         self.assertIn("captureId: \"cap_01testcapture0001\"", content)
         self.assertNotIn("不应保留", content)
+        self.assertNotIn("13800138000", content)
+
+    def test_inbox_can_keep_shipping_address_but_still_removes_phone(self) -> None:
+        payload = capture(capture_id="cap_01testcapture0011").to_dict()
+        payload["keepAddress"] = True
+        payload["rawText"] = "订单号：ABC123\n收货地址：深圳市龙华区人民路 13800138000\n测试充电器"
+        payload["order"]["shippingAddress"] = "深圳市龙华区人民路 13800138000"
+
+        result = self.storage.create_inbox_capture(CaptureEnvelope.from_dict(payload))
+        content = (self.vault / result["path"]).read_text(encoding="utf-8")
+
+        self.assertIn("收货地址：深圳市龙华区人民路 [已去除手机号]", content)
+        self.assertIn("containsSensitiveData: true", content)
         self.assertNotIn("13800138000", content)
 
     def test_draft_finds_duplicate_by_order_number(self) -> None:

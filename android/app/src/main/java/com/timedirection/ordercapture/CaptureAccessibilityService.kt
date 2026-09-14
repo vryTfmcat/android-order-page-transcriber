@@ -155,11 +155,16 @@ class CaptureAccessibilityService : AccessibilityService() {
                 OcrEngine.recognize(bitmap) { recognized ->
                     bitmap.recycle()
                     recognized.onSuccess { ocr ->
-                        // OCR follows visual reading order more reliably on canvas-heavy commerce apps.
-                        // Keep the accessibility tree as a fallback, but parse OCR text first.
-                        val combined = listOf(ocr.text, treeText).filter { it.isNotBlank() }.joinToString("\n")
-                        if (combined.isBlank()) fail("当前页面没有可识别文字")
-                        else finishWithText(combined, packageName, append, usedOcr = true, ocr.lowConfidenceSegments)
+                        val fused = OcrTextFusion.fuse(treeText, ocr.text)
+                        if (fused.text.isBlank()) fail("当前页面没有可识别文字")
+                        else finishWithText(
+                            fused.text,
+                            packageName,
+                            append,
+                            usedOcr = true,
+                            lowConfidenceSegments = ocr.lowConfidenceSegments,
+                            discardedOcrLines = ocr.discardedLines + fused.discardedLines,
+                        )
                     }.onFailure { fail("本地 OCR 失败：${it.message ?: "未知错误"}") }
                 }
             }
@@ -189,10 +194,19 @@ class CaptureAccessibilityService : AccessibilityService() {
         append: Boolean,
         usedOcr: Boolean,
         lowConfidenceSegments: Int = 0,
+        discardedOcrLines: Int = 0,
     ) {
-        val envelope = OrderParser.parse(text, packageName, fromOcr = usedOcr)
+        val store = SecureStore(this)
+        val envelope = OrderParser.parse(
+            text,
+            packageName,
+            fromOcr = usedOcr,
+            preserveAddress = store.shouldKeepShippingAddress(),
+            platformOverride = store.loadCapturePlatformOverride(),
+        )
         if (usedOcr) envelope.warnings += "本页使用本地 OCR，请重点核对商品名和数字"
         if (lowConfidenceSegments > 0) envelope.warnings += "OCR 已在原文标出 $lowConfidenceSegments 个低置信片段"
+        if (discardedOcrLines > 0) envelope.warnings += "已忽略 $discardedOcrLines 行低质量或图片装饰 OCR 文字"
         Log.i(LOG_TAG, "capture complete package=$packageName chars=${text.length} ocr=$usedOcr kind=${envelope.kind}")
         val minimumFeedbackMillis = 500L
         val remaining = (minimumFeedbackMillis - (SystemClock.elapsedRealtime() - captureStartedAt)).coerceAtLeast(0L)
@@ -235,7 +249,7 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     private fun shouldUseOcr(snapshot: WindowSnapshot): Boolean {
         val packageName = snapshot.packageName.lowercase()
-        if (packageName.contains("aweme")) return true
+        if (packageName.contains("aweme") || packageName.contains("ugc.livelite")) return true
         if (snapshot.text.length < 160) return true
         val strongFields = listOf("订单号", "订单编号", "订单編号", "实付", "实付款", "下单时间")
             .count { snapshot.text.contains(it) }
@@ -246,8 +260,8 @@ class CaptureAccessibilityService : AccessibilityService() {
         showOverlay(message, null, 15_000)
     }
 
-    fun showResultOverlay(message: String, openIntent: android.content.Intent) {
-        showOverlay("$message\n点此查看转录结果", openIntent, 12_000)
+    fun showResultOverlay(message: String, openIntent: android.content.Intent, timeoutMillis: Long = 12_000) {
+        showOverlay("$message\n点此查看转录结果", openIntent, timeoutMillis)
     }
 
     private fun showOverlay(message: String, openIntent: android.content.Intent?, timeoutMillis: Long) {

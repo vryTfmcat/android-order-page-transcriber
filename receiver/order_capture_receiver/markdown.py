@@ -9,35 +9,80 @@ from .models import CaptureEnvelope, CaptureItem
 
 
 SENSITIVE_LINE_RE = re.compile(
-    r"(?:收货(?:人|地址)|详细地址|联系电话|手机号码|手机号|银行卡|支付账号|快[递遞]单号|运单号|物流单号)\s*[:：]?",
+    r"(?:收货(?:人|地址)|详细地址|联系电话|手机号码|手机号|银行卡|支付账号|快[递遞]单号|运单号|物流单号|券号|支付宝交易号|微信交易号)\s*[:：]?",
     re.IGNORECASE,
 )
+SPLIT_SENSITIVE_LABEL_RE = re.compile(r"快[递遞]单号|运单号|物流单号|券号|支付宝交易号|微信交易号", re.IGNORECASE)
+INVISIBLE_RE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff\ufffc]")
+LONG_PAYMENT_IDENTIFIER_RE = re.compile(r"^\d{24,40}$")
 PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
-MASKED_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d(?:[\d*＊•·xX\s]{3,10})\d{2,4}(?!\d)")
+LANDLINE_RE = re.compile(r"(?<!\d)0\d{2,3}[-－ ]?\d{7,8}(?!\d)")
+MASKED_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d(?:[\d*＊•·xX+＋\-'\"“”‘’\s]{3,14})\d{2,4}(?!\d)")
 CARD_RE = re.compile(r"(?i)(银行卡|卡号|支付账号)(\s*[:：]?\s*)[\d *-]{8,30}")
 PAYMENT_CARD_RE = re.compile(r"(?:银[行銀]|储[蓄蕴]|信用).*?卡|(?:卡|CARD)\s*[(*（]?\d{3,6}[)*）]?", re.IGNORECASE)
-ADDRESS_WORD_RE = re.compile(r"省|市|自治区|区|县|镇|街道|街|路|巷|村|社区|小区|花园|大厦|栋|室")
+ADDRESS_WORD_RE = re.compile(r"省|市|自治区|区|县|镇|街道|街|路|巷|村|社区|小区|花园|大厦|栋|幢|单元|号楼|楼层|室")
+PICKUP_PRIVACY_RE = re.compile(r"您的快件|取件码|取货码|签收人凭|代收点.*(?:领取|签收|电联)")
+BUILDING_UNIT_RE = re.compile(r"(?:\d+\s*(?:栋|幢|号楼|单元|室)|(?:栋|幢|号楼|单元|室)\s*\d+)")
 STANDALONE_TRACKING_RE = re.compile(r"^(?:JT|YT|SF|YTO|STO|ZTO|EMS)[0-9A-Z]{8,30}$", re.IGNORECASE)
 ILLEGAL_FILENAME_RE = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
 
 
-def redact_sensitive_text(text: str) -> tuple[str, list[str]]:
+def redact_sensitive_text(text: str, *, preserve_address: bool = False) -> tuple[str, list[str]]:
     warnings: list[str] = []
     output: list[str] = []
-    for line in text.splitlines():
+    remove_next_identifier = False
+    for original in text.splitlines():
+        line = INVISIBLE_RE.sub("", original).strip()
+        compact_identifier = re.sub(r"[\s-]", "", line)
+        if remove_next_identifier and 8 <= len(compact_identifier) <= 50 and compact_identifier.isalnum() and sum(c.isdigit() for c in compact_identifier) >= 8:
+            output.append("[已去除敏感字段]")
+            warnings.append("已过滤地址、联系方式、支付账号或物流编号字段")
+            remove_next_identifier = False
+            continue
+        remove_next_identifier = False
         address_count = len(ADDRESS_WORD_RE.findall(line))
+        looks_like_address = (
+            bool(re.search(r"收货地址|详细地址|收货信息|收货人信息", line))
+            or bool(PICKUP_PRIVACY_RE.search(line))
+            or bool(BUILDING_UNIT_RE.search(line))
+            or address_count >= 2
+            or (address_count >= 1 and "展开" in line)
+        )
+        has_non_address_secret = (
+            bool(SPLIT_SENSITIVE_LABEL_RE.search(line))
+            or bool(PAYMENT_CARD_RE.search(line))
+            or bool(STANDALONE_TRACKING_RE.fullmatch(line.replace(" ", "")))
+            or bool(LONG_PAYMENT_IDENTIFIER_RE.fullmatch(compact_identifier))
+        )
+        if preserve_address and looks_like_address and not has_non_address_secret:
+            redacted = PHONE_RE.sub("[已去除手机号]", line)
+            redacted = MASKED_PHONE_RE.sub("[已去除手机号]", redacted)
+            redacted = LANDLINE_RE.sub("[已去除座机号]", redacted)
+            redacted = CARD_RE.sub(r"\1\2[已去除]", redacted)
+            if redacted != line:
+                warnings.append("已过滤地址行中的联系电话或支付卡号")
+            output.append(redacted)
+            continue
         if (
             SENSITIVE_LINE_RE.search(line)
             or MASKED_PHONE_RE.search(line)
             or PAYMENT_CARD_RE.search(line)
             or STANDALONE_TRACKING_RE.fullmatch(line.replace(" ", ""))
+            or LONG_PAYMENT_IDENTIFIER_RE.fullmatch(compact_identifier)
+            or PICKUP_PRIVACY_RE.search(line)
+            or BUILDING_UNIT_RE.search(line)
             or address_count >= 2
             or (address_count >= 1 and "展开" in line)
         ):
             output.append("[已去除敏感字段]")
             warnings.append("已过滤地址、联系方式、支付账号或物流编号字段")
+            label = SPLIT_SENSITIVE_LABEL_RE.search(line)
+            if label:
+                remainder = re.sub(r"[\s:：·,，复制]", "", line[: label.start()] + line[label.end() :])
+                remove_next_identifier = not any(c.isdigit() for c in remainder)
             continue
         redacted = PHONE_RE.sub("[已去除手机号]", line)
+        redacted = LANDLINE_RE.sub("[已去除座机号]", redacted)
         redacted = CARD_RE.sub(r"\1\2[已去除]", redacted)
         if redacted != line:
             warnings.append("已过滤正文中的手机号或支付卡号")
@@ -51,6 +96,7 @@ def yaml_string(value: str) -> str:
 
 
 def safe_filename(value: str, maximum: int = 80) -> str:
+    value = redact_sensitive_text(value)[0]
     value = unicodedata.normalize("NFKC", value).strip().replace("\n", " ")
     value = ILLEGAL_FILENAME_RE.sub("-", value)
     value = re.sub(r"\s+", " ", value).strip(" .-")
@@ -64,8 +110,23 @@ def _money(value: float | None) -> str:
 
 
 def inbox_markdown(envelope: CaptureEnvelope) -> tuple[str, list[str]]:
-    redacted, redaction_warnings = redact_sensitive_text(envelope.raw_text)
-    warnings = list(dict.fromkeys([*envelope.warnings, *redaction_warnings]))
+    redacted, redaction_warnings = redact_sensitive_text(envelope.raw_text, preserve_address=envelope.keep_address)
+    title, title_warnings = redact_sensitive_text(envelope.title)
+    merchant, merchant_warnings = redact_sensitive_text(envelope.order.merchant)
+    safe_items: list[tuple[CaptureItem, str, str]] = []
+    item_warnings: list[str] = []
+    for item in envelope.order.items:
+        item_name, name_warnings = redact_sensitive_text(item.name)
+        specification, specification_warnings = redact_sensitive_text(item.specification)
+        safe_items.append((item, item_name, specification))
+        item_warnings.extend([*name_warnings, *specification_warnings])
+    warnings = list(dict.fromkeys([
+        *envelope.warnings,
+        *redaction_warnings,
+        *title_warnings,
+        *merchant_warnings,
+        *item_warnings,
+    ]))
     order = envelope.order
     lines = [
         "---",
@@ -76,10 +137,10 @@ def inbox_markdown(envelope: CaptureEnvelope) -> tuple[str, list[str]]:
         f"sourceApp: {yaml_string(envelope.source_app)}",
         f"sourceUrl: {yaml_string(envelope.source_url)}",
         f"kind: {envelope.kind}",
-        "containsSensitiveData: false",
+        f"containsSensitiveData: {'true' if envelope.keep_address and bool(envelope.order.shipping_address) else 'false'}",
         "---",
         "",
-        f"# {envelope.title}",
+        f"# {title or '未命名页面转录'}",
         "",
     ]
     if envelope.kind == "order":
@@ -88,33 +149,34 @@ def inbox_markdown(envelope: CaptureEnvelope) -> tuple[str, list[str]]:
                 "## 结构化订单",
                 "",
                 f"- 平台：{order.platform}",
-                f"- 商家：{order.merchant}",
+                f"- 商家：{merchant}",
                 f"- 订单号：`{order.order_number}`" if order.order_number else "- 订单号：待确认",
                 f"- 实付：{_money(order.total_paid)} 元" if order.total_paid is not None else "- 实付：待确认",
                 f"- 状态：{order.status or '待确认'}",
                 f"- 下单时间：{order.ordered_at or '待确认'}",
+                f"- 收货地址：{redact_sensitive_text(order.shipping_address, preserve_address=True)[0] or '待确认'}" if envelope.keep_address else None,
                 "",
                 "### 商品",
                 "",
             ]
         )
-        if order.items:
-            for item in order.items:
-                details = [item.specification]
+        if safe_items:
+            for item, item_name, specification in safe_items:
+                details = [specification]
                 if item.quantity is not None:
                     details.append(f"数量 {item.quantity}")
                 if item.line_price is not None:
                     details.append(f"实付 {_money(item.line_price)} 元")
                 suffix = "；".join(detail for detail in details if detail)
-                lines.append(f"- {item.name}" + (f"（{suffix}）" if suffix else ""))
+                lines.append(f"- {item_name or '待从原始转录中确认'}" + (f"（{suffix}）" if suffix else ""))
         else:
             lines.append("- 待从原始转录中确认")
         lines.append("")
-    lines.extend(["## 原始转录（已去敏）", "", "```text", redacted, "```", ""])
+    lines.extend(["## 原始转录（已过滤电话、账号与物流单号）", "", "```text", redacted, "```", ""])
     if warnings:
         lines.extend(["## 待核对", "", *[f"- {warning}" for warning in warnings], ""])
     lines.append("来源说明：由订单页面转录器在本地读取并转写；未保存页面截图。")
-    return "\n".join(lines).rstrip() + "\n", warnings
+    return "\n".join(line for line in lines if line is not None).rstrip() + "\n", warnings
 
 
 def entity_markdown(

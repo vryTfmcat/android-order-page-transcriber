@@ -2,7 +2,7 @@
 
 个人侧载的 Android App + Mac 本地接收服务。手机端一键读取当前页文字，必要时在内存中做中文 OCR，然后复制 Markdown、写入 Obsidian Inbox，或在查重和人工确认后建立实体卡。
 
-> 当前版本：`0.2.9` 真机修正版。针对 HyperOS 不分发系统无障碍按钮回调、后台回收后仍显示“已开启”的问题，App 会显示服务的真实连接状态，并在屏幕左侧提供自己的蓝色“取”按钮。按钮只依据当前活动窗口显示，不再被输入法或悬浮层事件反复切换而闪烁，进度/结果横幅也不再被自己的事件过早关闭；同时支持抖音订单详情页中被拆开的字段名/字段值，并加强独立快递单号去敏。
+> 当前版本：`0.2.18` 真机测试版。OCR 改为以无障碍文字为订单主干，只用图像识别补全订单锚点，避免商品图片广告字和推荐卡片混入。支持“实付教”以及“确认收货后付款”标签，兼容货币符号被识成 `Y`；已取消订单的“应付款”不冒充实付。同时防止优惠抵扣成为商品名，并保持地址可用、电话去敏。
 
 ## 已实现
 
@@ -12,7 +12,9 @@
 - 会缓存最近的非系统窗口文字，并拒绝把 MIUI 桌面、最近任务或系统设置误记为订单。
 - `FLAG_SECURE` 窗口明确报错，不绕过 Android 限制。
 - 手动滚动后“追加一页”：按文本行、订单号和字段去重；不自动滚动、点击或下单。
-- 订单和通用页面两种模式；默认删除地址、手机号、支付账号与物流单号。
+- 可开启“点取后自动发送 Inbox”；Mac 离线时加密排队，后续自动补送。追加模式仍需预览后手动发送。
+- 平台默认自动识别；连续采集同一平台时可固定为抖省省、抖音商城、淘宝、拼多多等专用解析规则。
+- 订单和通用页面两种模式；可选保留收货地址（个人使用默认开启），手机号、座机、支付账号与物流单号仍删除。
 - 离线队列、配对信息和队列内容均由 Android Keystore 生成的 AES-GCM 密钥加密；不缓存截图。
 - Mac 同时提供局域网证书指纹锁定 HTTPS 与 Tailscale Serve 回环后端。
 - `captureId` 幂等 Inbox 写入，实体草稿查重，以确认令牌原子创建/更新实体。
@@ -30,7 +32,7 @@
 需要 Python 3、OpenSSL 和 Tailscale。本机的 Tailnet 地址为示例：
 
 ```bash
-./scripts/setup_receiver.sh 'https://mac-mini.tail73cba1.ts.net/order-capture'
+ORDER_CAPTURE_VAULT='/path/to/your/Obsidian-vault' ./scripts/setup_receiver.sh 'https://your-mac.your-tailnet.ts.net/order-capture'
 ./scripts/start_receiver.sh
 ./scripts/configure_tailscale.sh
 ```
@@ -47,7 +49,7 @@ tailscale serve status
 
 配对二维码在 `runtime/pairing-qr.svg`。它含设备令牌，不应发布、同步或放入 Obsidian。
 
-`start_receiver.sh` 在终端权限下启动脱离会话的守护进程。这是因为 macOS 不允许普通 LaunchAgent 直接读取受保护的 `Documents` 目录。重启 Mac 后需再运行一次启动脚本；不把源码或秘密复制到库外的系统目录。
+`start_receiver.sh` 在 Terminal 权限下启动脱离会话的守护进程。开机项使用 `scripts/start_receiver_at_login.command`，由 Terminal 继承已授予的 Documents 权限后启动接收端；登录时可能短暂显示 Terminal 窗口。普通 LaunchAgent 直接运行 Python 会被 macOS 拒绝访问 Documents。
 
 ## Android 构建与安装
 
@@ -55,7 +57,7 @@ Android Studio、SDK 36 和 JDK 17 就绪后：
 
 ```bash
 ./scripts/build_android.sh
-/Users/a13713912476/Documents/Codex/Android/sdk/platform-tools/adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 安装后：
@@ -67,7 +69,7 @@ Android Studio、SDK 36 和 JDK 17 就绪后：
 
 ## 使用流程
 
-1. 在 App 首页选择“下次：新建转录”，再打开订单详情并点击磁贴/无障碍按钮；或从购物 App 的分享面板选择本 App。
+1. 在 App 首页选择“下次：新建转录”，按需开启自动发送并选择批量平台，再打开订单详情点击蓝色“取”；或从购物 App 的分享面板选择本 App。
 2. 需要第二屏时自己滚动，再点“追加一页”。
 3. 在预览页修正 OCR 数字和商品名，选择复制 Markdown、发送 Inbox 或查重建立实体。
 4. 实体写入必须选择已有分类；有重复候选时，必须显式选择“更新已有”或“仍创建新实体”。
