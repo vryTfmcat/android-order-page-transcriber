@@ -90,7 +90,7 @@ class OrderParserTest {
     }
 
     @Test
-    fun parsesOrderKeepsAddressAndRedactsPhoneByDefault() {
+    fun parsesOrderKeepsAddressAndRedactsPhoneWhenExplicitlyEnabled() {
         val result = OrderParser.parse(
             """
             拼多多
@@ -104,6 +104,7 @@ class OrderParserTest {
             联系电话：13800138000
             """.trimIndent(),
             "com.xunmeng.pinduoduo",
+            preserveAddress = true,
         )
         assertEquals("order", result.kind)
         assertEquals("拼多多", result.order.platform)
@@ -123,7 +124,7 @@ class OrderParserTest {
         val second = OrderParser.parse("订单号：ABCDEF1234\n商品甲\n下单时间：2026-08-31 12:30")
         val merged = OrderParser.merge(first, second)
         assertEquals(first.captureId, merged.captureId)
-        assertEquals(1, merged.rawText.lineSequence().count { it == "商品甲" })
+        assertEquals(2, merged.rawText.lineSequence().count { it == "商品甲" })
         assertEquals("2026-08-31 12:30", merged.order.orderedAt)
     }
 
@@ -160,6 +161,7 @@ class OrderParserTest {
             ¥13.49
             x1
             """.trimIndent(),
+            preserveAddress = true,
         )
         assertEquals("拼多多", result.order.platform)
         assertEquals("260831-111122223333444", result.order.orderNumber)
@@ -678,6 +680,7 @@ class OrderParserTest {
             2026-09-07 13:35:27
             """.trimIndent(),
             "com.ss.android.ugc.livelite",
+            preserveAddress = true,
         )
 
         assertEquals("喵梵思宠物食品旗舰店", result.order.merchant)
@@ -713,6 +716,7 @@ class OrderParserTest {
             2026-09-06 00:01:15
             """.trimIndent(),
             "com.ss.android.ugc.livelite",
+            preserveAddress = true,
         )
 
         assertEquals(25.85, result.order.totalPaid!!, 0.001)
@@ -851,5 +855,143 @@ class OrderParserTest {
         assertEquals("交易成功", result.order.status)
         assertEquals("【暑假】盒马水牛乳米布...", result.order.items.first().name)
         assertTrue(result.order.merchant.isBlank())
+    }
+
+    @Test
+    fun douyinV2KeepsNamedAmountsIndependentAndCalculatesSpend() {
+        val result = OrderParser.parse(
+            """
+            交易完成
+            测试官方旗舰店
+            测试商品 ¥100.00
+            商品总价 ¥100.00
+            订单运费 ¥5.00
+            店铺优惠 -¥10.00
+            平台优惠 -¥20.00
+            金币抵扣 -¥5.00
+            实付款 ¥70.00
+            订单编号 6900000000000000014复制
+            下单时间 2026-09-10 10:00:00
+            """.trimIndent(),
+            "com.ss.android.ugc.aweme",
+        )
+
+        assertEquals(2, result.schemaVersion)
+        assertEquals(100.0, result.order.amounts.productTotal!!, 0.001)
+        assertEquals(5.0, result.order.amounts.shippingFee!!, 0.001)
+        assertEquals(70.0, result.order.amounts.actualPaid!!, 0.001)
+        assertEquals(70.0, result.order.actualSpend!!, 0.001)
+        assertNull(result.order.amounts.payAfterReceipt)
+        assertFalse(result.issues.any { it.code == "AMOUNT_EQUATION_MISMATCH" })
+    }
+
+    @Test
+    fun douyinV2SeparatesPostpayFromActualPaid() {
+        val result = OrderParser.parse(
+            "运输中\n测试店铺>\n测试商品 ¥20.00\n确认收货后付款 ¥9.03\n订单编号 6900000000000000015复制",
+            "com.ss.android.ugc.aweme",
+        )
+
+        assertNull(result.order.amounts.actualPaid)
+        assertEquals(9.03, result.order.amounts.payAfterReceipt!!, 0.001)
+        assertEquals(9.03, result.order.totalPaid!!, 0.001)
+    }
+
+    @Test
+    fun douyinV2AuditsTrailingOneOrderNumberCorrection() {
+        val result = OrderParser.parse(
+            "交易完成\n测试店铺>\n测试商品 ¥20.00\n实付款 ¥20.00\n订单编号 69000000000000000161复制",
+            "com.ss.android.ugc.aweme",
+        )
+
+        assertEquals("6900000000000000016", result.order.orderNumber)
+        assertTrue(result.issues.any { it.severity == "WARN" && it.code == "DOUYIN_ORDER_ID_TRAILING_ONE_FIXED" })
+    }
+
+    @Test
+    fun douyinV2RejectsInvalidOrderNumberAndReportsCollapsedItems() {
+        val result = OrderParser.parse(
+            "交易完成\n测试店铺>\n测试商品 ¥20.00\n实付款 ¥20.00\n订单编号 123456复制\n查看剩余 3 件商品",
+            "com.ss.android.ugc.aweme",
+        )
+
+        assertTrue(result.issues.any { it.severity == "ERROR" && it.code == "DOUYIN_ORDER_ID_INVALID" })
+        assertTrue(result.issues.any { it.code == "ITEMS_COLLAPSED" })
+    }
+
+    @Test
+    fun douyinV2WholeRefundMakesActualSpendZero() {
+        val result = OrderParser.parse(
+            "退款成功\n测试店铺>\n测试商品 ¥20.00\n实付款 ¥20.00\n订单编号 6900000000000000017复制\n订单取消时间 2026-09-10 10:00:00",
+            "com.ss.android.ugc.aweme",
+        )
+
+        assertEquals("whole", result.order.refundState)
+        assertEquals(0.0, result.order.actualSpend!!, 0.001)
+    }
+
+    @Test
+    fun mergePreservesPageProvenanceAndOnlyDropsBoundaryOverlap() {
+        val first = OrderParser.parse("订单编号 6900000000000000018复制\n商品甲\n共同边界", "com.ss.android.ugc.aweme")
+        val second = OrderParser.parse("共同边界\n商品甲\n实付款 ¥20.00", "com.ss.android.ugc.aweme")
+        val merged = OrderParser.merge(first, second)
+
+        assertEquals(2, merged.pages.size)
+        assertEquals(1, merged.rawText.lineSequence().count { it == "共同边界" })
+        assertEquals(2, merged.rawText.lineSequence().count { it == "商品甲" })
+    }
+
+    @Test
+    fun partialRefundDoesNotSubtractFromPageActualPaidAgain() {
+        val result = OrderParser.parse(
+            "交易完成\n测试店铺>\n测试商品 ¥30.00\n退款成功\n实付款 ¥10.00\n订单编号 6900000000000000019复制",
+            "com.ss.android.ugc.aweme",
+        )
+
+        assertEquals("partial", result.order.refundState)
+        assertEquals(10.0, result.order.amounts.actualPaid!!, 0.001)
+        assertEquals(10.0, result.order.actualSpend!!, 0.001)
+    }
+
+    @Test
+    fun switchesBetweenDouyinMallAndGroupbuyProfiles() {
+        val raw = """
+            待使用
+            团购订单
+            门店名称：测试咖啡店
+            双人套餐
+            实付金额：39.90
+            团购订单号：6900000000000000020
+        """.trimIndent()
+        val automatic = OrderParser.parse(raw, "com.ss.android.ugc.aweme")
+        val forcedMall = OrderParser.parse(raw, "com.ss.android.ugc.aweme", platformOverride = "抖音商城规则")
+
+        assertEquals("抖音团购", automatic.order.platform)
+        assertEquals("douyin_groupbuy", automatic.recognitionProfile)
+        assertEquals(39.9, automatic.order.totalPaid!!, 0.001)
+        assertEquals("已使用".replace("已", "待"), automatic.order.status)
+        assertEquals("抖音商城", forcedMall.order.platform)
+        assertEquals("douyin_mall", forcedMall.recognitionProfile)
+    }
+
+    @Test
+    fun detectsElemeAndUsesItsDedicatedLabels() {
+        val result = OrderParser.parse(
+            "订单已送达\n商家：测试面馆\n牛肉面 x1\n订单实付：18.80\n订单号：ELM202610030001",
+            "me.ele",
+        )
+
+        assertEquals("饿了么", result.order.platform)
+        assertEquals("eleme", result.recognitionProfile)
+        assertEquals("测试面馆", result.order.merchant)
+        assertEquals(18.8, result.order.totalPaid!!, 0.001)
+        assertEquals("订单已送达", result.order.status)
+    }
+
+    @Test
+    fun exposesAllRequestedSwitchableProfiles() {
+        val expected = setOf("拼多多", "抖音商城", "抖音团购", "美团", "饿了么", "淘宝", "京东", "闲鱼")
+        assertTrue(PlatformProfiles.all.map { it.platform }.containsAll(expected))
+        assertEquals(PlatformProfiles.AUTO_LABEL, PlatformProfiles.options.first())
     }
 }

@@ -136,6 +136,7 @@ def inbox_markdown(envelope: CaptureEnvelope) -> tuple[str, list[str]]:
         f"capturedAt: {yaml_string(envelope.captured_at)}",
         f"sourceApp: {yaml_string(envelope.source_app)}",
         f"sourceUrl: {yaml_string(envelope.source_url)}",
+        f"recognitionProfile: {yaml_string(envelope.recognition_profile)}",
         f"kind: {envelope.kind}",
         f"containsSensitiveData: {'true' if envelope.keep_address and bool(envelope.order.shipping_address) else 'false'}",
         "---",
@@ -148,10 +149,18 @@ def inbox_markdown(envelope: CaptureEnvelope) -> tuple[str, list[str]]:
             [
                 "## 结构化订单",
                 "",
+                f"- 识别规则：{envelope.recognition_profile or '自动/通用'}",
                 f"- 平台：{order.platform}",
                 f"- 商家：{merchant}",
                 f"- 订单号：`{order.order_number}`" if order.order_number else "- 订单号：待确认",
                 f"- 实付：{_money(order.total_paid)} 元" if order.total_paid is not None else "- 实付：待确认",
+                f"- 商品总价：{_money(order.amounts.product_total)} 元" if order.amounts.product_total is not None else None,
+                f"- 应付款：{_money(order.amounts.payable)} 元" if order.amounts.payable is not None else None,
+                f"- 页面实付款：{_money(order.amounts.actual_paid)} 元" if order.amounts.actual_paid is not None else None,
+                f"- 确认收货后付款：{_money(order.amounts.pay_after_receipt)} 元" if order.amounts.pay_after_receipt is not None else None,
+                f"- 运费：{_money(order.amounts.shipping_fee)} 元" if order.amounts.shipping_fee is not None else None,
+                f"- 实际消费：{_money(order.actual_spend)} 元" if order.actual_spend is not None else "- 实际消费：待校验",
+                f"- 退款范围：{order.refund_state}",
                 f"- 状态：{order.status or '待确认'}",
                 f"- 下单时间：{order.ordered_at or '待确认'}",
                 f"- 收货地址：{redact_sensitive_text(order.shipping_address, preserve_address=True)[0] or '待确认'}" if envelope.keep_address else None,
@@ -166,7 +175,9 @@ def inbox_markdown(envelope: CaptureEnvelope) -> tuple[str, list[str]]:
                 if item.quantity is not None:
                     details.append(f"数量 {item.quantity}")
                 if item.line_price is not None:
-                    details.append(f"实付 {_money(item.line_price)} 元")
+                    details.append(f"金额 {_money(item.line_price)} 元（{item.amount_type}）")
+                if item.refund_state != "none":
+                    details.append(f"退款 {item.refund_state}")
                 suffix = "；".join(detail for detail in details if detail)
                 lines.append(f"- {item_name or '待从原始转录中确认'}" + (f"（{suffix}）" if suffix else ""))
         else:
@@ -175,6 +186,12 @@ def inbox_markdown(envelope: CaptureEnvelope) -> tuple[str, list[str]]:
     lines.extend(["## 原始转录（已过滤电话、账号与物流单号）", "", "```text", redacted, "```", ""])
     if warnings:
         lines.extend(["## 待核对", "", *[f"- {warning}" for warning in warnings], ""])
+    if envelope.issues:
+        lines.extend([
+            "## 校验与报错", "",
+            *[f"- [{issue.severity}] `{issue.code}` {issue.message}" for issue in envelope.issues],
+            "",
+        ])
     lines.append("来源说明：由订单页面转录器在本地读取并转写；未保存页面截图。")
     return "\n".join(line for line in lines if line is not None).rstrip() + "\n", warnings
 

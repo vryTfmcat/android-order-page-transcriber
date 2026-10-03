@@ -68,8 +68,17 @@ class SecureStore(context: Context) {
     fun setKeepShippingAddress(enabled: Boolean) = put("keep_shipping_address", enabled.toString())
     fun shouldKeepShippingAddress(): Boolean = get("keep_shipping_address")?.toBooleanStrictOrNull() ?: true
 
-    fun setCapturePlatform(value: String) = put("capture_platform", value.takeIf { it in PLATFORM_OPTIONS && it != "自动识别" })
-    fun loadCapturePlatformOverride(): String = get("capture_platform").orEmpty().takeIf { it in PLATFORM_OPTIONS } ?: ""
+    fun setCapturePlatform(value: String) = put(
+        "capture_platform",
+        value.takeIf { it in PLATFORM_OPTIONS && it != PlatformProfiles.AUTO_LABEL },
+    )
+
+    fun loadCapturePlatformOverride(): String {
+        val saved = get("capture_platform").orEmpty()
+        if (saved.isBlank()) return ""
+        // 兼容旧版保存的「抖音商城」等平台名称。
+        return PlatformProfiles.bySelection(saved)?.label.orEmpty()
+    }
 
     fun enqueue(path: String, envelope: CaptureEnvelope) {
         val array = get("queue")?.let(::JSONArray) ?: JSONArray()
@@ -96,6 +105,6 @@ class SecureStore(context: Context) {
     }
 
     companion object {
-        val PLATFORM_OPTIONS = listOf("自动识别", "抖省省", "抖音商城", "淘宝", "拼多多", "闲鱼", "京东", "美团", "小米商城")
+        val PLATFORM_OPTIONS = PlatformProfiles.options
     }
 }

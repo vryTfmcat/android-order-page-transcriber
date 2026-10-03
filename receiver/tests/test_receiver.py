@@ -238,6 +238,57 @@ class ReceiverTest(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_schema_v2_preserves_independent_amounts_issues_and_pages(self) -> None:
+        payload = capture(capture_id="cap_01testcapturev2001").to_dict()
+        payload["schemaVersion"] = 2
+        payload["order"].update({
+            "amounts": {
+                "productTotal": 120.0,
+                "shippingFee": 0.0,
+                "storeDiscount": 10.0,
+                "platformDiscount": 20.0,
+                "coinDiscount": 0.2,
+                "paymentDiscount": None,
+                "payable": None,
+                "actualPaid": 89.8,
+                "payAfterReceipt": None,
+                "deposit": None,
+            },
+            "refundState": "none",
+            "actualSpend": 89.8,
+        })
+        payload["order"]["items"][0].update({
+            "amountType": "order_fallback", "refundState": "none", "sourcePage": 1,
+            "evidence": "测试充电器", "confidence": "medium",
+        })
+        payload["issues"] = [{
+            "severity": "INFO", "code": "ITEM_AMOUNT_FROM_ORDER_TOTAL",
+            "message": "单商品行金额沿用订单付款金额", "field": "order.items.linePrice", "source": "derived",
+        }]
+        payload["pages"] = [{"pageIndex": 1, "captureId": payload["captureId"], "capturedAt": payload["capturedAt"]}]
+        payload["recognitionProfile"] = "douyin_mall"
+
+        envelope = CaptureEnvelope.from_dict(payload)
+        self.assertEqual(envelope.schema_version, 2)
+        self.assertEqual(envelope.order.amounts.actual_paid, 89.8)
+        self.assertEqual(envelope.order.items[0].amount_type, "order_fallback")
+        self.assertEqual(envelope.recognition_profile, "douyin_mall")
+        self.assertEqual(envelope.to_dict()["recognitionProfile"], "douyin_mall")
+        result = self.storage.create_inbox_capture(envelope)
+        content = (self.vault / result["path"]).read_text(encoding="utf-8")
+        self.assertIn("页面实付款：89.8 元", content)
+        self.assertIn("实际消费：89.8 元", content)
+        self.assertIn("识别规则：douyin_mall", content)
+        self.assertIn("`ITEM_AMOUNT_FROM_ORDER_TOTAL`", content)
+
+    def test_zero_paid_amount_is_not_treated_as_missing(self) -> None:
+        payload = capture(capture_id="cap_01testcapturezero01").to_dict()
+        payload["order"]["totalPaid"] = 0
+        payload["order"].pop("amounts", None)
+        envelope = CaptureEnvelope.from_dict(payload)
+        self.assertEqual(envelope.order.total_paid, 0.0)
+        self.assertEqual(envelope.order.amounts.actual_paid, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

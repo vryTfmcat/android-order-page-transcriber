@@ -26,10 +26,24 @@ object OrderParser {
         RegexOption.IGNORE_CASE,
     )
     private val paidMoney = Regex(
-        "(?:实付(?:款|价)?|付款金额|确认收货后付款)\\s*[:：]?\\s*[,，]?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)",
+        "(?:实付(?:款|价)?|付款金额)\\s*[:：]?\\s*[,，]?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)",
         RegexOption.IGNORE_CASE,
     )
+    private val payAfterReceiptMoney = Regex("确认收货后付款\\s*[:：]?\\s*[,，]?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)")
     private val unpaidMoney = Regex("应付款\\s*[:：]?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)")
+    private val cancelledTime = Regex("(?:订单取消时间|取消时间)\\s*[:：]?\\s*(${dateTimePattern()})")
+    private val namedAmountPatterns = linkedMapOf(
+        "productTotal" to Regex("商品总价\\s*[:：]?\\s*[¥￥Yy]?\\s*(-?[0-9]+(?:[.,][0-9]{1,2})?)"),
+        "shippingFee" to Regex("(?:订单)?运费\\s*[:：]?\\s*[¥￥Yy]?\\s*(-?[0-9]+(?:[.,][0-9]{1,2})?)"),
+        "storeDiscount" to Regex("店铺优惠[^0-9-]*-?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)"),
+        "platformDiscount" to Regex("平台优惠[^0-9-]*-?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)"),
+        "coinDiscount" to Regex("(?:金币|余额)(?:\\+余额)?抵扣[^0-9-]*-?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)"),
+        "paymentDiscount" to Regex("支付优惠[^0-9-]*-?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)"),
+        "payable" to unpaidMoney,
+        "actualPaid" to paidMoney,
+        "payAfterReceipt" to payAfterReceiptMoney,
+        "deposit" to Regex("定金\\s*[:：]?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)"),
+    )
     private val explicitProduct = Regex(
         "^(?:商品名称|商品名)\\s*[:：]\\s*(.+?)(?:[,，]\\s*(?:单价|规格描述|规格|数量)\\s*[:：].*)?$",
         RegexOption.IGNORE_CASE,
@@ -143,24 +157,27 @@ object OrderParser {
     ): CaptureEnvelope {
         val redacted = redact(raw, preserveAddress)
         val text = redacted.text
-        val lines = dedupeLines(text)
+        val lines = normalizedPageLines(text)
         val normalizedLines = lines.map(::stripMarkers)
         val normalized = normalizedLines.joinToString("\n")
             .replace("編", "编")
             .replace("號", "号")
             .replace("實", "实")
-        val platform = platformOverride.ifBlank { detectPlatform(sourcePackage, normalized, sourceUrl) }
+        val profile = PlatformProfiles.resolve(platformOverride, sourcePackage, normalized, sourceUrl)
+        val platform = profile?.platform ?: platformOverride.takeIf { it != PlatformProfiles.AUTO_LABEL }.orEmpty()
+        val activeStatusWords = (profile?.statusWords.orEmpty() + statusWords).distinct()
+        val activeOrderHints = (profile?.orderHints.orEmpty() + orderHints).distinct()
         val parseRawLines = orderRelevantLines(lines)
         val parseLines = parseRawLines.map(::stripMarkers)
         val parseText = parseLines.joinToString("\n")
         val hasMoney = Regex("[¥￥Yy]\\s*[0-9]").containsMatchIn(parseText) ||
             (parseText.any { it in "¥￥Yy" } && parseText.any(Char::isDigit))
-        val hasOrderState = statusWords.any { parseText.contains(it) }
+        val hasOrderState = activeStatusWords.any { parseText.contains(it) }
         val hasOrderActions = listOf("联系商家", "申请退款", "申请售后", "催发货", "查看物流")
             .count { parseText.contains(it) } >= 2
         val hasVoucherEvidence = listOf("团购详情", "券码详情", "到店自提", "超值券")
             .any { parseText.contains(it) }
-        val isOrder = orderHints.count { parseText.contains(it) } >= 2 ||
+        val isOrder = activeOrderHints.count { parseText.contains(it) } >= 2 ||
             orderNumber.containsMatchIn(parseText) ||
             (platform.isNotBlank() && (
                 (hasMoney && (hasOrderState || hasOrderActions)) ||
@@ -168,22 +185,38 @@ object OrderParser {
                 ))
         val data = OrderData(platform = platform)
         val warnings = redacted.warnings.toMutableList()
+        val issues = mutableListOf<ValidationIssue>()
         if (isOrder) {
-            data.orderNumber = orderNumber.find(parseText)?.groupValues?.get(1).orEmpty()
+            data.orderNumber = extractProfileOrderNumber(parseText, profile)
             if (data.orderNumber.isBlank()) {
                 data.orderNumber = extractCopiedOrderNumber(parseLines)
             }
-            val directPaid = extractPaid(parseRawLines, warnings, fromOcr)
-            data.totalPaid = directPaid ?: when {
+            if (isDouyinPlatform(platform)) data.orderNumber = validateDouyinOrderNumber(data.orderNumber, issues)
+            data.amounts = extractNamedAmounts(parseText)
+            val warningCountBeforePaid = warnings.size
+            val directPaid = extractPaid(parseRawLines, warnings, fromOcr, profile)
+            if (directPaid != null) data.amounts.actualPaid = directPaid
+            if (directPaid == null && warnings.drop(warningCountBeforePaid).any { it.contains("小数点") }) {
+                data.amounts.actualPaid = null
+            }
+            if (data.amounts.payAfterReceipt == null) {
+                data.amounts.payAfterReceipt = extractAmount(payAfterReceiptMoney, parseText)
+            }
+            data.totalPaid = data.amounts.actualPaid ?: data.amounts.payAfterReceipt ?: when {
                 isDouyinPlatform(platform) -> extractFragmentedDouyinPaid(parseLines)
                 platform == "闲鱼" -> extractFragmentedMarketplacePaid(parseLines)
                 else -> null
             }
+            if (data.amounts.actualPaid == null && data.amounts.payAfterReceipt == null && data.totalPaid != null) {
+                val postpayLabel = parseLines.any { it.contains("确认收货后付款") }
+                if (postpayLabel) data.amounts.payAfterReceipt = data.totalPaid else data.amounts.actualPaid = data.totalPaid
+            }
             if (directPaid == null && data.totalPaid != null && isDouyinPlatform(platform)) {
                 warnings += "实付金额由页面中分离的金额字段配对得到，请核对"
+                issues += ValidationIssue("WARN", "AMOUNT_FRAGMENTED_PAIR", "付款金额由分离的标签和值配对得到", "order.amounts", "page")
             }
             data.status = parseLines.asSequence()
-                .mapNotNull { line -> statusWords.firstOrNull { line.contains(it) } }
+                .mapNotNull { line -> activeStatusWords.firstOrNull { line.contains(it) } }
                 .firstOrNull().orEmpty()
                 .replace("您已确认收货", "交易成功")
                 .replace("交易咸功", "交易成功")
@@ -196,7 +229,8 @@ object OrderParser {
                     warnings += "订单已关闭，页面仅有应付款 ${formatMoney(payable)} 元，未作为实付记录"
                 }
             }
-            data.orderedAt = time.find(parseText)?.groupValues?.get(1).orEmpty()
+            data.orderedAt = extractOrderTime(parseText)
+            data.cancelledAt = cancelledTime.find(parseText)?.groupValues?.get(1).orEmpty()
             if (preserveAddress) data.shippingAddress = extractShippingAddress(lines)
             val isPrize = isDouyinPlatform(platform) && parseLines.any { it.contains("奖品编号") || it.contains("超级福袋奖品") }
             if (data.orderedAt.isBlank() && (isDouyinPlatform(platform) || platform in setOf("淘宝", "闲鱼")) &&
@@ -205,12 +239,22 @@ object OrderParser {
                 data.orderedAt = parseLines.firstNotNullOfOrNull { dateTimeValue.find(it)?.value }.orEmpty()
             }
             data.merchant = when {
+                profile != null -> extractProfileMerchant(parseLines, profile).ifBlank {
+                    extractMerchantByPlatform(parseLines, platform)
+                }
                 isDouyinPlatform(platform) -> extractFragmentedDouyinMerchant(parseLines).ifBlank { extractMerchant(parseLines) }
                 platform == "闲鱼" -> extractValueAfterLabel(parseLines, "卖家昵称").ifBlank { extractMerchant(parseLines) }
                 platform == "淘宝" -> extractTaobaoMerchant(parseLines).ifBlank { extractMerchant(parseLines) }
                 else -> extractMerchant(parseLines)
             }
             data.items += extractItems(parseLines, data)
+            enrichItems(data.items, parseLines, issues)
+            data.refundState = detectRefundState(parseText, data)
+            data.actualSpend = calculateActualSpend(data, issues)
+            validateAmountEquation(data.amounts, issues)
+            Regex("查看剩余\\s*(\\d+)\\s*件商品").find(parseText)?.let { match ->
+                issues += ValidationIssue("WARN", "ITEMS_COLLAPSED", "页面仍有 ${match.groupValues[1]} 件商品未展开", "order.items", "page")
+            }
             if (isPrize) warnings += "该记录为福袋奖品；时间按领奖时间保存，页面展示价不作为实付"
         }
         val title = when {
@@ -219,7 +263,7 @@ object OrderParser {
             normalizedLines.isNotEmpty() -> normalizedLines.first().take(80)
             else -> "未命名页面转录"
         }
-        return CaptureEnvelope(
+        val envelope = CaptureEnvelope(
             sourceApp = sourcePackage,
             sourceUrl = sourceUrl,
             title = title,
@@ -228,6 +272,8 @@ object OrderParser {
             keepAddress = preserveAddress,
             order = data,
             warnings = warnings,
+            issues = issues,
+            recognitionProfile = profile?.id.orEmpty(),
         ).also {
             if (isOrder && data.orderNumber.isBlank()) it.warnings += "订单号未识别，请人工核对"
             if (isOrder && data.totalPaid == null && it.warnings.none { warning -> warning.contains("实付") }) {
@@ -235,11 +281,168 @@ object OrderParser {
             }
             if (isOrder && data.items.isEmpty()) it.warnings += "商品名称未可靠识别，请从原文补充"
         }
+        envelope.pages += CapturePage(1, envelope.captureId, envelope.capturedAt)
+        envelope.warnings.forEach { warning ->
+            if (envelope.issues.none { issue -> issue.message == warning }) {
+                envelope.issues += ValidationIssue("WARN", "LEGACY_WARNING", warning, source = "parser")
+            }
+        }
+        return envelope
     }
 
-    private fun extractPaid(lines: List<String>, warnings: MutableList<String>, fromOcr: Boolean): Double? {
+    private fun dateTimePattern(): String = "[0-9]{4}[-/.年][0-9]{1,2}[-/.月][0-9]{1,2}(?:日)?(?:\\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)?"
+
+    private fun extractAmount(pattern: Regex, text: String): Double? = pattern.find(text)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.replace(',', '.')
+        ?.toDoubleOrNull()
+
+    private fun extractProfileOrderNumber(text: String, profile: PlatformProfile?): String {
+        val labels = (profile?.orderNumberLabels.orEmpty() + listOf("订单号", "订单编号", "订单详情号", "商家单号")).distinct()
+        val labelPattern = labels.joinToString("|") { Regex.escape(it) }
+        return Regex("(?:$labelPattern)\\s*[:：]?\\s*([0-9A-Za-z-]{6,80})", RegexOption.IGNORE_CASE)
+            .find(text)?.groupValues?.get(1).orEmpty()
+            .ifBlank { orderNumber.find(text)?.groupValues?.get(1).orEmpty() }
+    }
+
+    private fun extractOrderTime(text: String): String {
+        for (label in listOf("下单时间", "创建时间", "领奖时间", "付款时间", "成交时间")) {
+            Regex("$label\\s*[:：]?\\s*(${dateTimePattern()})").find(text)?.groupValues?.get(1)?.let { return it }
+        }
+        return ""
+    }
+
+    private fun extractNamedAmounts(text: String): OrderAmounts {
+        val values = namedAmountPatterns.mapValues { (_, pattern) -> extractAmount(pattern, text) }
+        return OrderAmounts(
+            productTotal = values["productTotal"],
+            shippingFee = values["shippingFee"],
+            storeDiscount = values["storeDiscount"],
+            platformDiscount = values["platformDiscount"],
+            coinDiscount = values["coinDiscount"],
+            paymentDiscount = values["paymentDiscount"],
+            payable = values["payable"],
+            actualPaid = values["actualPaid"],
+            payAfterReceipt = values["payAfterReceipt"],
+            deposit = values["deposit"],
+        )
+    }
+
+    private fun validateDouyinOrderNumber(raw: String, issues: MutableList<ValidationIssue>): String {
+        if (raw.isBlank()) return raw
+        val digits = raw.filter(Char::isDigit)
+        if (digits.length == 20 && digits.endsWith('1')) {
+            val corrected = digits.dropLast(1)
+            issues += ValidationIssue(
+                "WARN", "DOUYIN_ORDER_ID_TRAILING_ONE_FIXED",
+                "抖音订单号为 20 位且末位为 1，已按规则截为 19 位；原值 $digits",
+                "order.orderNumber", "page",
+            )
+            return corrected
+        }
+        if (digits.length != 19 || digits != raw) {
+            issues += ValidationIssue(
+                "ERROR", "DOUYIN_ORDER_ID_INVALID",
+                "抖音订单号应为 19 位纯数字，当前值为 $raw",
+                "order.orderNumber", "page",
+            )
+        }
+        return raw
+    }
+
+    private fun enrichItems(items: List<CaptureItem>, lines: List<String>, issues: MutableList<ValidationIssue>) {
+        items.forEach { item ->
+            item.sourcePage = item.sourcePage ?: 1
+            item.evidence = item.evidence.ifBlank { listOf(item.name, item.specification).filter(String::isNotBlank).joinToString(" | ") }
+            item.amountType = when {
+                item.linePrice == null -> "unknown"
+                items.size == 1 -> "order_fallback"
+                else -> "line_total"
+            }
+            item.confidence = if (item.amountType == "order_fallback") "medium" else "high"
+            if (item.amountType == "order_fallback") {
+                issues += ValidationIssue(
+                    "INFO", "ITEM_AMOUNT_FROM_ORDER_TOTAL",
+                    "单商品行金额沿用订单付款金额，未把它冒充为页面明确展示的单品金额",
+                    "order.items.linePrice", "derived",
+                )
+            }
+            if ((item.quantity ?: 0) >= 100) {
+                issues += ValidationIssue("WARN", "QUANTITY_SUSPICIOUS", "商品数量 ${item.quantity} 较大，请核对 OCR", "order.items.quantity", "page")
+            }
+            val itemIndex = lines.indexOfFirst { normalize(it).contains(normalize(item.name).take(12)) }
+            if (itemIndex >= 0 && lines.drop(itemIndex).take(8).any { it.contains("退款成功") || it.contains("已退款") }) {
+                item.refundState = "refunded"
+            }
+        }
+    }
+
+    private fun detectRefundState(text: String, data: OrderData): String {
+        val hasRefundSuccess = text.contains("退款成功") || text.contains("已退款")
+        return when {
+            hasRefundSuccess && data.cancelledAt.isNotBlank() -> "whole"
+            data.items.any { it.refundState == "refunded" } -> "partial"
+            hasRefundSuccess -> "unknown"
+            else -> "none"
+        }
+    }
+
+    private fun calculateActualSpend(data: OrderData, issues: MutableList<ValidationIssue>): Double? {
+        val paid = data.amounts.actualPaid ?: data.amounts.payAfterReceipt
+        return when (data.refundState) {
+            "whole" -> 0.0
+            "partial" -> {
+                if (paid != null) return paid
+                val kept = data.items.filter { it.refundState != "refunded" }
+                if (kept.isNotEmpty() && kept.all { it.linePrice != null && it.amountType == "line_total" }) {
+                    kept.sumOf { it.linePrice ?: 0.0 }
+                } else {
+                    issues += ValidationIssue(
+                        "WARN", "PARTIAL_REFUND_SPEND_UNKNOWN",
+                        "检测到部分退款，但缺少可靠的逐件实付，实际消费暂不计算",
+                        "order.actualSpend", "derived",
+                    )
+                    null
+                }
+            }
+            "unknown" -> {
+                issues += ValidationIssue("WARN", "REFUND_SCOPE_UNKNOWN", "检测到退款成功，但无法判断整单或单品范围；页面实付款仍按已扣除退款商品处理", "order.refundState", "page")
+                paid
+            }
+            else -> paid
+        }
+    }
+
+    private fun validateAmountEquation(amounts: OrderAmounts, issues: MutableList<ValidationIssue>) {
+        val total = amounts.productTotal ?: return
+        val paid = amounts.actualPaid ?: amounts.payAfterReceipt ?: amounts.payable ?: return
+        val expected = total + (amounts.shippingFee ?: 0.0) - listOfNotNull(
+            amounts.storeDiscount, amounts.platformDiscount, amounts.coinDiscount, amounts.paymentDiscount,
+        ).sum()
+        if (kotlin.math.abs(expected - paid) > 0.02) {
+            issues += ValidationIssue(
+                "WARN", "AMOUNT_EQUATION_MISMATCH",
+                "页面金额关系不平：商品总价+运费-优惠=${formatMoney(expected)}，付款字段=${formatMoney(paid)}",
+                "order.amounts", "derived",
+            )
+        }
+    }
+
+    private fun extractPaid(
+        lines: List<String>,
+        warnings: MutableList<String>,
+        fromOcr: Boolean,
+        profile: PlatformProfile?,
+    ): Double? {
+        val labels = (profile?.actualPaidLabels.orEmpty() + listOf("实付款", "实付价", "实付", "付款金额")).distinct()
+        val labelPattern = labels.joinToString("|") { Regex.escape(it) }
+        val profilePaidMoney = Regex(
+            "(?:$labelPattern)\\s*[:：]?\\s*[,，]?\\s*[¥￥Yy]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)",
+            RegexOption.IGNORE_CASE,
+        )
         for (line in lines) {
-            val match = paidMoney.find(stripMarkers(line)) ?: continue
+            val match = profilePaidMoney.find(stripMarkers(line)) ?: paidMoney.find(stripMarkers(line)) ?: continue
             val token = match.groupValues[1].replace(',', '.')
             val explicitlyClosedInteger = Regex(
                 "(?:实付(?:款|价)?|付款金额).*?[0-9]+\\s*(?:元|[>〉])",
@@ -317,6 +520,32 @@ object OrderParser {
         return lines.drop(index + 1).take(3).firstOrNull { value ->
             value.isNotBlank() && value != "复制" && !value.startsWith("[已去除")
         }?.trim(' ', '>', '〉', '|').orEmpty()
+    }
+
+    private fun extractProfileMerchant(lines: List<String>, profile: PlatformProfile): String {
+        for (label in profile.merchantLabels) {
+            extractValueAfterLabel(lines, label).takeIf(::isMerchantValue)?.let { return it.take(80) }
+            lines.firstNotNullOfOrNull { line ->
+                Regex("^(?:${Regex.escape(label)})\\s*[:：]\\s*(.{2,80})$")
+                    .find(line)?.groupValues?.getOrNull(1)
+            }
+                ?.trim()
+                ?.takeIf(::isMerchantValue)
+                ?.let { return it.take(80) }
+        }
+        return ""
+    }
+
+    private fun isMerchantValue(value: String): Boolean = value.length in 2..80 &&
+        value.any(Char::isLetter) &&
+        !dateTimeValue.containsMatchIn(value) &&
+        excludedItemHints.none { value.contains(it) }
+
+    private fun extractMerchantByPlatform(lines: List<String>, platform: String): String = when {
+        isDouyinPlatform(platform) -> extractFragmentedDouyinMerchant(lines).ifBlank { extractMerchant(lines) }
+        platform == "闲鱼" -> extractValueAfterLabel(lines, "卖家昵称").ifBlank { extractMerchant(lines) }
+        platform == "淘宝" -> extractTaobaoMerchant(lines).ifBlank { extractMerchant(lines) }
+        else -> extractMerchant(lines)
     }
 
     private fun extractTaobaoMerchant(lines: List<String>): String {
@@ -479,7 +708,7 @@ object OrderParser {
 
     fun merge(base: CaptureEnvelope?, addition: CaptureEnvelope): CaptureEnvelope {
         if (base == null) return addition
-        val mergedText = dedupeLines(base.rawText + "\n" + addition.rawText).joinToString("\n")
+        val mergedText = mergePageText(base.rawText, addition.rawText)
         val wasOcr = (base.warnings + addition.warnings).any { it.contains("OCR") }
         val reparsed = parse(
             mergedText,
@@ -487,13 +716,40 @@ object OrderParser {
             base.sourceUrl.ifBlank { addition.sourceUrl },
             fromOcr = wasOcr,
             preserveAddress = addition.keepAddress,
-            platformOverride = base.order.platform.ifBlank { addition.order.platform },
+            platformOverride = base.recognitionProfile.ifBlank {
+                addition.recognitionProfile.ifBlank { base.order.platform.ifBlank { addition.order.platform } }
+            },
         )
         reparsed.captureId = base.captureId
         reparsed.capturedAt = base.capturedAt
         reparsed.warnings.addAll((base.warnings + addition.warnings).filterNot { reparsed.warnings.contains(it) })
+        reparsed.issues.addAll((base.issues + addition.issues).filterNot { old -> reparsed.issues.any { it.code == old.code && it.message == old.message } })
+        reparsed.pages.clear()
+        reparsed.pages.addAll((base.pages.ifEmpty { mutableListOf(CapturePage(1, base.captureId, base.capturedAt)) }))
+        val knownIds = reparsed.pages.map { it.captureId }.toMutableSet()
+        val addedPages = addition.pages.ifEmpty { mutableListOf(CapturePage(1, addition.captureId, addition.capturedAt)) }
+        addedPages.filter { knownIds.add(it.captureId) }.forEach { page ->
+            reparsed.pages += page.copy(pageIndex = reparsed.pages.size + 1)
+        }
         return reparsed
     }
+
+    /** Remove only the repeated boundary produced by overlapping screenshots.
+     * Repeated SKU rows elsewhere remain intact and can be reviewed as real items. */
+    internal fun mergePageText(base: String, addition: String): String {
+        val left = normalizedPageLines(base)
+        val right = normalizedPageLines(addition)
+        val limit = minOf(30, left.size, right.size)
+        val overlap = (limit downTo 1).firstOrNull { size ->
+            left.takeLast(size).map(::normalize) == right.take(size).map(::normalize)
+        } ?: 0
+        return (left + right.drop(overlap)).joinToString("\n")
+    }
+
+    private fun normalizedPageLines(text: String): List<String> = text.lineSequence()
+        .map { it.trim().replace(Regex("\\s+"), " ") }
+        .filter(String::isNotBlank)
+        .toList()
 
     internal fun dedupeLines(text: String): List<String> {
         val seen = linkedSetOf<String>()
@@ -508,24 +764,8 @@ object OrderParser {
 
     private fun stripMarkers(value: String): String = uncertainMarker.replace(value) { it.groupValues[1] }
 
-    private fun detectPlatform(packageName: String, text: String, url: String): String {
-        val source = "$packageName $url ${text.take(2500)}".lowercase(Locale.ROOT)
-        return when {
-            source.contains("idlefish") || text.contains("闲鱼") -> "闲鱼"
-            source.contains("pinduoduo") || source.contains("yangkeduo") || source.contains("xunmeng") ||
-                text.contains("拼多多") || text.contains("多多支付") || text.contains("拼小圈") || text.contains("再次拼单") -> "拼多多"
-            source.contains("ugc.livelite") -> "抖省省"
-            source.contains("aweme") || text.contains("抖音商城") ||
-                text.contains("来自抖音") || text.contains("抖音支付") || text.contains("抖音月付") -> "抖音商城"
-            source.contains("taobao") || text.contains("淘宝") -> "淘宝"
-            source.contains("jingdong") || source.contains("jd.com") || text.contains("京东") -> "京东"
-            source.contains("sankuai") || text.contains("美团") -> "美团"
-            source.contains("xiaomi") || text.contains("小米商城") -> "小米商城"
-            else -> ""
-        }
-    }
-
-    private fun isDouyinPlatform(platform: String): Boolean = platform == "抖音商城" || platform == "抖省省"
+    private fun isDouyinPlatform(platform: String): Boolean =
+        platform == "抖音商城" || platform == "抖音团购" || platform == "抖省省"
 
     private fun extractItems(lines: List<String>, data: OrderData): List<CaptureItem> {
         val explicitItems = lines.mapNotNull { line ->

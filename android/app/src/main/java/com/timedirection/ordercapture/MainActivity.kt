@@ -146,7 +146,7 @@ class MainActivity : Activity() {
             textSize = 12f
         })
         content.addView(TextView(this).apply {
-            text = "批量识别平台（默认自动；连续采集同一平台时可固定）"
+            text = "识别规则（默认自动；批量采集前可固定到某个平台）"
             textSize = 14f
             setPadding(0, dp(6), 0, 0)
         })
@@ -390,6 +390,7 @@ class MainActivity : Activity() {
         status.text = buildString {
             append(if (envelope.kind == "order") "已识别为订单" else "通用页面转录")
             if (envelope.order.platform.isNotBlank()) append(" · ${envelope.order.platform}")
+            PlatformProfiles.bySelection(envelope.recognitionProfile)?.let { append(" · ${it.label}") }
             append(" · ${envelope.rawText.lineSequence().count()} 行")
             if (envelope.warnings.isNotEmpty()) append(" · ${envelope.warnings.size} 项待核对")
         }
@@ -435,7 +436,7 @@ class MainActivity : Activity() {
             original.sourceUrl,
             fromOcr = original.warnings.any { it.contains("OCR") },
             preserveAddress = store.shouldKeepShippingAddress(),
-            platformOverride = platformEditor.text.toString().trim(),
+            platformOverride = original.recognitionProfile.ifBlank { platformEditor.text.toString().trim() },
         )
         reparsed.captureId = original.captureId
         reparsed.capturedAt = original.capturedAt
